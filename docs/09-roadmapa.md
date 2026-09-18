@@ -15,7 +15,10 @@ Cel: naciskam skrót, mówię, tekst pojawia się w oknie, kopiuję go.
 - `diktate-cli`: `toggle`, `start`, `stop`, `status`, `devices`,
   `model pull/list`, `config check`
 - `diktate-gtk`: okno dyktowania, wskaźnik poziomu, kopiowanie, tray (`ksni`)
-- `diktate-document`: spany, append, `Ctrl+Z`
+- `diktate-document`: spany, `Insert` w kotwicę wstawiania, `Ctrl+Z`
+- Normalizacja wstawianego tekstu: spacje na stykach, usuwanie końcowego
+  wielokropka, adaptacyjny próg ciszy w VAD
+  ([07](07-zachowanie-dyktowania.md))
 - Konfiguracja: `daemon.toml`, `gtk.toml`
 - Skrót globalny przez `gsettings`
 
@@ -27,13 +30,15 @@ VAD i prompt na prawdziwym materiale, zanim zbudujemy cokolwiek na wierzchu.
 Cel: zaznaczam fragment, dyktuję go od nowa, zostaje zastąpiony.
 
 - Pełny model dokumentu: kotwice, `Splice`, log operacji, redo
-- Tryb zastępowania w oknie GTK (`Ctrl+R`, rozstrzyganie po `audio_start_ms`)
+- Zastępowanie uzbrajane samym zaznaczeniem, `Ctrl+R` jako wariant jawny,
+  rozstrzyganie po `audio_start_ms`
+- Kontekst promptu z dokumentu (`session.context`)
 - Edycja klawiaturą jako operacje w tym samym logu
 - Zapis historii: `raw.ndjson`, `ops.ndjson`, `note.md`
 - Przeglądarka historii w tray-u
 
 Etap 2 jest osobny od etapu 1 celowo: model kotwic ma sens dopiero wtedy, gdy
-istnieje strumień segmentów, na którym widać wyścig między appendem
+istnieje strumień segmentów, na którym widać wyścig między wstawianiem
 a zaznaczeniem.
 
 ## Etap 3 — Komendy głosowe i aktywacja głosem
@@ -77,7 +82,8 @@ Cel: surowa transkrypcja zamieniana w tekst do przeczytania.
 - Redakcja jako operacje `Splice` w logu — odwracalna `Ctrl+Z`
 - Podgląd zmian przed zastosowaniem
 - Szablony promptów redakcyjnych per profil
-- Rozstrzygnięcie punktów z [07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md)
+- Rozstrzygnięcie spraw otwartych z
+  [07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md#sprawy-otwarte)
 
 ## Poza roadmapą
 

@@ -31,7 +31,8 @@ struct Span {
 ```
 
 Tekst widoczny w oknie to konkatenacja spanów. Nowy segment = jeden span
-dopisany na koniec.
+wstawiony **w punkcie wstawiania** (zwykle, ale nie zawsze, na końcu listy —
+patrz [07](07-zachowanie-dyktowania.md#punkt-wstawiania)).
 
 Edycja **nie zmienia segmentów** — zmienia listę spanów. Zastąpienie
 zaznaczenia to operacja `splice`: wytnij spany pokrywające zaznaczenie (tnąc
@@ -48,12 +49,23 @@ dokument = fold(operacje) na pustej liście spanów
 
 ```rust
 enum Op {
-    Append   { span: Span },
+    Insert   { at: Anchor, spans: Vec<Span> },
     Splice   { from: Anchor, to: Anchor, replacement: Vec<Span> },
     Delete   { from: Anchor, to: Anchor },
     SetText  { from: Anchor, to: Anchor, text: String }, // edycja klawiaturą
 }
 ```
+
+Nie ma osobnego `Append` — dopisanie na koniec to `Insert` z kotwicą na końcu
+dokumentu. Jedna ścieżka zamiast dwóch oznacza, że wstawianie w środek notatki
+nie jest przypadkiem szczególnym, którego nikt nie przetestował.
+
+`spans` jest listą, bo normalizacja tekstu segmentu
+([07](07-zachowanie-dyktowania.md#sklejanie-z-otoczeniem)) potrafi dołożyć do
+wstawianego tekstu spację rozdzielającą, a usunięcie końcowego wielokropka
+przycina span poprzedzający. Jedno wstawienie z punktu widzenia użytkownika
+jest **jedną** operacją w logu — inaczej `Ctrl+Z` cofałby dodaną spację
+osobno od tekstu, do którego ona należy.
 
 Undo to zdjęcie ostatniej operacji i ponowne złożenie dokumentu — dostajemy je
 za darmo, nie implementujemy osobno. Redo to odłożony stos zdjętych operacji.
@@ -75,10 +87,24 @@ struct Anchor {
 }
 ```
 
-`SpanId` jest stabilny i nigdy nie jest reużywany. Dopisanie nowego segmentu
-tworzy nowy span na końcu listy i **nie dotyka żadnej istniejącej kotwicy**.
-Z tego wynika gwarancja: równoległy napływ segmentów nigdy nie unieważnia
-trwającego zaznaczenia.
+`SpanId` jest stabilny i nigdy nie jest reużywany. Dopisanie segmentu na końcu
+dokumentu tworzy nowy span i **nie dotyka żadnej istniejącej kotwicy**.
+
+Wstawienie w środek dokumentu ([07](07-zachowanie-dyktowania.md#punkt-wstawiania))
+trafia albo na granicę spanów — i wtedy również nie dotyka niczego — albo do
+wnętrza spanu, który trzeba przeciąć. Cięcie ma jedną regułę:
+
+> **Lewa połówka zachowuje `SpanId`, prawa dostaje nowy.**
+
+Kotwice o offsecie mniejszym od punktu cięcia pozostają dosłownie takie same.
+Kotwice za punktem cięcia są przeliczane przez `fold` na `(nowy id, offset −
+punkt cięcia)` — przekształcenie deterministyczne i lokalne, wykonywane na
+spanie, którego zaznaczenie i tak nie obejmuje (punkt wstawiania leży poza
+zaznaczeniem, bo przy uzbrojonym zastąpieniu kotwica wstawiania się nie
+porusza).
+
+Z tego wynika gwarancja, o którą w tym wszystkim chodzi: równoległy napływ
+segmentów nigdy nie unieważnia trwającego zaznaczenia.
 
 Kotwica może stać się nieważna tylko wtedy, gdy inna *edycja* usunęła span, na
 który wskazuje. Przy jednym oknie klienta to nie zachodzi. Przy wielu klientach
@@ -92,22 +118,35 @@ offsety w ogóle występują.
 
 ### Przebieg
 
-1. Użytkownik zaznacza fragment w oknie i naciska `Ctrl+R` (albo przycisk
-   „Podyktuj ponownie").
+1. Użytkownik zaznacza fragment w oknie. **Samo zaznaczenie uzbraja
+   zastąpienie** — nie ma osobnego trybu do włączenia. `Ctrl+R` (albo przycisk
+   „Podyktuj ponownie") jest równoważnym uzbrojeniem jawnym, potrzebnym przy
+   `gtk.dictation.implicit_replace = false` i w trybie `until_confirm`.
 2. Klient zapamiętuje kotwice zaznaczenia oraz `replace_armed_at` — moment
-   w osi czasu audio sesji, w którym tryb został włączony.
+   w osi czasu audio sesji, w którym zaznaczenie powstało. Kotwica wstawiania
+   zostaje tam, gdzie była.
 3. Okno wyróżnia zaznaczenie i pokazuje etykietę „zastępuję…".
 4. Użytkownik mówi. VAD zamyka segment po ciszy, whisper go transkrybuje,
    daemon rozgłasza `segment.added`.
 5. Klient rozstrzyga na podstawie `audio_start_ms`:
-   - `audio_start_ms < replace_armed_at` → **append** (to resztka poprzedniej
-     mowy, która czekała w kolejce)
-   - `audio_start_ms >= replace_armed_at` → **splice** w zapamiętane kotwice
-6. Po wykonaniu splice klient wraca do trybu append.
+   - `audio_start_ms < replace_armed_at` → **`Insert`** w kotwicę wstawiania
+     (to resztka poprzedniej mowy, która czekała w kolejce); zaznaczenie
+     pozostaje uzbrojone
+   - `audio_start_ms >= replace_armed_at` → **`Splice`** w zapamiętane kotwice
+6. Po wykonaniu `Splice` zaznaczenie znika, kotwica wstawiania ląduje za nowym
+   tekstem, klient wraca do zwykłego wstawiania — i dyktowanie płynie dalej od
+   poprawionego miejsca.
 
 Krok 5 jest istotą poprawności. Granicę wyznacza **timestamp audio, nie
 kolejność przybycia** — dzięki temu zaległości w kolejce nie powodują, że
-zastąpieniem stanie się zdanie wypowiedziane sekundę wcześniej.
+zastąpieniem stanie się zdanie wypowiedziane sekundę wcześniej. Prototyp
+`gadajj` tego nie rozróżniał i właśnie tam się psuł
+([07](07-zachowanie-dyktowania.md#rozstrzyganie-po-osi-czasu-audio)).
+
+Normalizacja brzegów (rozszerzenie zaznaczenia do granicy słowa, spacje,
+interpunkcja za zaznaczeniem) jest opisana w
+[07](07-zachowanie-dyktowania.md#granice-zaznaczenia) i wchodzi w skład tej
+samej operacji `Splice`.
 
 ### Reguła zakończenia
 
@@ -117,7 +156,8 @@ sięgania po klawiaturę w trakcie mówienia i psuje rytm dyktowania. Jeśli
 poprawka nie mieści się w jednej wypowiedzi, użytkownik zaznacza nową wersję
 i dyktuje ponownie.
 
-`Escape` anuluje tryb zastępowania bez żadnych zmian w dokumencie.
+`Escape` znosi zaznaczenie i anuluje zastępowanie bez żadnych zmian
+w dokumencie.
 
 Parametr konfiguracyjny `gtk.replace.mode = "one_utterance" | "until_confirm"`
 zostawia furtkę, gdyby praktyka pokazała coś innego.
@@ -154,10 +194,15 @@ redakcję LLM-a tym samym mechanizmem, co wszystko inne.
 `diktate-document` jest testowalny w całości bez audio, bez daemona i bez GTK
 — to zwykła biblioteka nad strukturami danych. Przypadki obowiązkowe:
 
-- append w trakcie aktywnego zaznaczenia nie przesuwa kotwic
+- wstawienie na końcu w trakcie aktywnego zaznaczenia nie przesuwa kotwic
+- wstawienie w środek spanu tnie go tak, że lewa połówka zachowuje `SpanId`,
+  a kotwica za punktem cięcia wskazuje ten sam znak co przed operacją
 - splice przez granicę dwóch spanów tnie skrajne poprawnie
 - splice obejmujący całe spany usuwa je w całości
-- segment z `audio_start_ms` sprzed uzbrojenia trybu robi append, nie splice
+- segment z `audio_start_ms` sprzed uzbrojenia trafia w kotwicę wstawiania,
+  a zaznaczenie zostaje uzbrojone dla następnego segmentu
+- normalizacja (spacja rozdzielająca, usunięty wielokropek) jest częścią jednej
+  operacji — jedno `Ctrl+Z` cofa wstawienie razem z nią
 - undo po splice odtwarza dokument znak w znak
 - sekwencja losowych operacji: `fold(ops)` daje ten sam wynik przy każdym
   przeliczeniu (test własnościowy)

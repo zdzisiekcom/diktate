@@ -89,7 +89,9 @@ numer aplikacji.
 `diktate-document` jest w całości testowalny bez wejścia-wyjścia. Testy
 własnościowe (`proptest`) na sekwencjach losowych operacji weryfikują, że
 `fold(ops)` daje stabilny wynik i że kotwice nigdy nie stają się nieważne przez
-sam append.
+samo wstawienie nowego segmentu — także wtedy, gdy wstawienie wypada wewnątrz
+spanu i tnie go na pół
+([03](03-model-dokumentu.md#kotwice--dlaczego-to-jest-spójne)).
 
 ### Testy z nagraniami
 
@@ -99,7 +101,9 @@ całą ścieżkę audio → VAD → segmenty deterministyczną i testowalną w C
 
 Przypadki obowiązkowe: mowa ciągła bez przerw (twarde cięcie na 30 s), mowa
 z długimi przerwami, cisza i szum (filtr halucynacji), mowa zaczynająca się
-natychmiast (pre-roll), mowa w dwóch językach.
+natychmiast (pre-roll), mowa w dwóch językach, wypowiedź dłuższa niż
+`long_segment_ms` z krótką pauzą w środku (adaptacyjny próg ciszy tnie ją
+tam, gdzie zwykły próg by nie ciął).
 
 Same transkrypcje nie są porównywane dosłownie — model bywa
 niedeterministyczny między wersjami. Sprawdzana jest liczba segmentów, ich

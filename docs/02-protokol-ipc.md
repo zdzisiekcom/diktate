@@ -62,6 +62,29 @@ segmenty o numerze większym niż podany (z journalu), a od tego momentu
 przysyła powiadomienia. Bez `since_seq` klient dostaje pełny snapshot
 bieżącej sesji.
 
+### Kontekst transkrypcji
+
+| Metoda | Parametry | Wynik |
+|--------|-----------|-------|
+| `session.context` | `{ text: string }` | `{ chars }` |
+
+Klient przysyła ogon tekstu **poprzedzającego punkt wstawiania** (a przy
+uzbrojonym zastąpieniu — poprzedzającego zaznaczenie), obcięty do
+`whisper.context.chars`. Daemon używa go jako `prompt` przy kolejnych
+segmentach, dzięki czemu model trzyma terminologię i pisownię nazw własnych.
+
+Wywołanie jest **podpowiedzią, nie zobowiązaniem**: daemon transkrybuje
+normalnie także wtedy, gdy nikt kontekstu nie przysłał, a przy
+`whisper.context.source = "transcript"` ignoruje go i bierze ogon własnego
+logu. Kierunek jest jednostronny — daemon nie zna dokumentu i nie próbuje go
+poznać; dostaje tylko ciąg znaków do promptu.
+
+Powód, dla którego kontekst pochodzi od klienta, a nie z logu transkrypcji:
+w logu jest to, co whisper *usłyszał*, a w dokumencie to, co użytkownik
+*zatwierdził*. Po poprawieniu błędnie rozpoznanego nazwiska model ma widzieć
+wersję poprawioną. Szczegóły w
+[07](07-zachowanie-dyktowania.md#kontekst-dla-whispera).
+
 ### Modele i konfiguracja
 
 | Metoda | Parametry | Wynik |
@@ -106,7 +129,7 @@ Najważniejsze zdarzenie w całym systemie.
 `audio_start_ms` jest liczony od początku sesji i jest **jedyną prawdziwą osią
 czasu**. Kolejność przybycia do klienta może się różnić od kolejności
 wypowiedzi przy zaległościach w kolejce, więc klient porządkuje po
-`audio_start_ms`, a rozstrzyga o trybie edycji (append vs. zastąpienie) także
+`audio_start_ms`, a rozstrzyga o trybie edycji (wstawienie vs. zastąpienie) także
 po nim. Szczegóły w [03](03-model-dokumentu.md).
 
 `seq` jest monotoniczny i służy wyłącznie do nadrabiania zaległości
@@ -115,12 +138,17 @@ po nim. Szczegóły w [03](03-model-dokumentu.md).
 `avg_logprob` i `no_speech_prob` pochodzą z whispera i pozwalają klientowi
 oznaczyć segmenty o niskiej pewności (np. innym kolorem).
 
+`language` przy `[whisper].language = "auto"` bywa zmyślony — whisper na szumie
+potrafi „wykryć" język, którego nie było. Segmenty z językiem spoza
+`filters.allowed_languages` daemon odrzuca jako `segment.dropped`
+z `reason = "language"`, zamiast podawać je klientowi.
+
 ### Pozostałe
 
 | Powiadomienie | Znaczenie |
 |---------------|-----------|
 | `segment.pending` | Segment zamknięty przez VAD, czeka lub jest liczony. Pozwala pokazać placeholder |
-| `segment.dropped` | Segment odrzucony przez filtr halucynacji (`reason`) |
+| `segment.dropped` | Segment odrzucony przez filtr (`reason`: `pattern`, `no_speech`, `logprob`, `too_short`, `language`) |
 | `state.changed` | `{ state, backlog, backend, model, warning? }` |
 | `audio.level` | `{ rms, peak }` — do wizualizacji, dławione do ~20 Hz |
 | `model.progress` | `{ job_id, downloaded, total }` |

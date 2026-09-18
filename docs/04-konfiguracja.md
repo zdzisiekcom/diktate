@@ -47,7 +47,9 @@ engine = "silero"             # "silero" | "energy" | "off"
 model_path = ""               # puste = wbudowany silero_vad.onnx
 threshold = 0.5               # 0.0–1.0
 speech_frames_to_start = 3    # ramek 30 ms potwierdzających początek mowy
-silence_ms_to_end = 600       # cisza zamykająca segment
+silence_ms_to_end = 900       # cisza zamykająca krótką wypowiedź
+long_segment_ms = 5000        # od tej długości wypowiedź uznajemy za długą
+silence_ms_to_end_long = 350  # skrócona cisza zamykająca długą wypowiedź
 min_segment_ms = 300          # krótsze odrzucane jako trzask
 max_segment_ms = 30000        # twarde cięcie (okno whispera to 30 s)
 frame_ms = 30
@@ -67,8 +69,9 @@ suppress_blank = true
 translate = false
 
 [whisper.context]
-enabled = true                # doklejanie ogona poprzedniego tekstu do promptu
-chars = 200
+enabled = true                # doklejanie ogona wcześniejszego tekstu do promptu
+source = "client"             # "client" = tekst z session.context | "transcript"
+chars = 1200                  # ile znaków kontekstu trafia do promptu
 repetition_guard = true
 repetition_threshold = 0.85   # powyżej → ponowna transkrypcja bez kontekstu
 
@@ -85,6 +88,8 @@ drop_patterns = [
 ]
 drop_if_no_speech_prob_above = 0.6
 drop_if_avg_logprob_below = -1.0
+allowed_languages = ["pl", "en"]   # działa tylko przy [whisper].language = "auto";
+                                   # pusta lista = bez ograniczeń
 
 [journal]
 enabled = true
@@ -148,6 +153,15 @@ close_on_copy = true
 show_level_meter = true
 show_confidence = true        # segmenty o niskiej pewności innym kolorem
 
+[dictation]
+insert_at_cursor = true        # segment wchodzi w miejscu karetki, nie na końcu
+implicit_replace = true        # niepuste zaznaczenie uzbraja zastąpienie
+snap_to_word_boundary = true   # zaznaczenie pół słowa rozszerzane do granic
+auto_space = true              # spacja rozdzielająca na stykach
+strip_trailing_ellipsis = true # usuwanie „...” na końcu przerwanej wypowiedzi
+auto_case = "off"              # "off" — korekta wielkości liter na łączeniach
+follow_caret = true            # przewijanie do punktu wstawiania, gdy był widoczny
+
 [replace]
 mode = "one_utterance"        # "one_utterance" | "until_confirm"
 highlight_color = "#f6d32d"
@@ -183,6 +197,9 @@ rejestruje go środowisko graficzne. Patrz [06-gui.md](06-gui.md#skrót-globalny
 Opisany w całości w [05-agent.md](05-agent.md).
 
 Sekcja `[wakeword]` powyżej jest opisana w [10-wake-word.md](10-wake-word.md).
+Sekcje `[dictation]`, `[replace]` oraz progi `[vad]` i `[filters]` związane
+z rytmem dyktowania mają uzasadnienie w
+[07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md).
 
 ## Kolejność rozstrzygania
 

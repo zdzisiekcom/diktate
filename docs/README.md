@@ -16,7 +16,7 @@ Status: **faza projektowa**. Nie ma jeszcze kodu.
 | [04-konfiguracja.md](04-konfiguracja.md) | Pełny układ plików TOML, wszystkie parametry |
 | [05-agent.md](05-agent.md) | Komendy głosowe, reguły, bezpieczeństwo |
 | [06-gui.md](06-gui.md) | Okno dyktowania, tray, skróty klawiaturowe |
-| [07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md) | **Serce aplikacji** — semantyka dyktowania (szkic) |
+| [07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md) | **Serce aplikacji** — semantyka dyktowania |
 | [08-dystrybucja-i-testy.md](08-dystrybucja-i-testy.md) | Budowanie, pakowanie, strategia testów |
 | [09-roadmapa.md](09-roadmapa.md) | Kolejność prac, etapy, co świadomie odłożone |
 | [10-wake-word.md](10-wake-word.md) | Aktywacja głosem — przegląd silników, wybrane rozwiązanie |
@@ -42,6 +42,12 @@ założenia wyjściowe całej reszty dokumentacji.
 8. **Wake word przez VAD + whisper `tiny`**, nie przez dedykowany silnik.
    Jeden mechanizm obsługuje i „dyktuj", i „zdzisław, zgaś światło", bez
    nowych zależności i bez treningu modeli.
+9. **Model interakcji przejęty z prototypu `gadajj`**: tekst wchodzi w miejscu
+   karetki, zaznaczenie samo w sobie znaczy „zastąp to", a po zastąpieniu
+   dyktowanie płynie dalej od poprawionego miejsca. Prototyp był używany na
+   co dzień i to zachowanie zdało egzamin — przepisujemy je,
+   dokładając rozstrzyganie po osi czasu audio i pełną odwracalność.
+   Szczegóły w [07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md).
 
 ## Poza zakresem pierwszej wersji
 

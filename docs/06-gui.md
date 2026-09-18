@@ -37,6 +37,17 @@ w kolejce okno wygląda jak zawieszone.
 **Segmenty o niskiej pewności** (`avg_logprob` poniżej progu) są wyróżniane
 kolorem — sygnał, że warto przeczytać uważniej.
 
+**Karetka jest punktem wstawiania.** Tekst z kolejnej wypowiedzi wchodzi tam,
+gdzie stoi kursor, a po wstawieniu kursor stoi za nim — dyktowanie płynie dalej
+od tego miejsca. Kliknięcie w środek notatki przenosi dyktowanie w środek
+notatki. Okno nie przewija się do punktu wstawiania, jeśli użytkownik odjechał
+widokiem w inne miejsce (`dictation.follow_caret`).
+
+**Zaznaczenie znaczy „zastąp to"** — bez wchodzenia w żaden tryb. Zaznaczony
+fragment zmienia kolor na `replace.highlight_color`, pojawia się etykieta
+„zastępuję…", a następna wypowiedź wchodzi w jego miejsce. `Escape` znosi
+zaznaczenie. Pełna semantyka: [07](07-zachowanie-dyktowania.md#zaznaczenie-i-zastępowanie).
+
 **Pasek stanu** pokazuje model, język, backend i — gdy `backlog` przekroczy
 `warn_backlog_at` — licznik zaległości.
 
@@ -46,13 +57,19 @@ kolorem — sygnał, że warto przeczytać uważniej.
 |-------|-------|
 | `Ctrl+C` | Kopiuj całość do schowka |
 | `Ctrl+Enter` | Kopiuj i zamknij |
-| `Ctrl+R` | Podyktuj ponownie zaznaczony fragment |
+| `Ctrl+R` | Podyktuj ponownie zaznaczony fragment (jawne uzbrojenie; przy `implicit_replace` wystarczy zaznaczenie) |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Cofnij / ponów |
 | `Ctrl+S` | Zapisz do historii |
 | `Ctrl+Space` | Pauza / wznowienie nagrywania |
 | `Escape` | Anuluj tryb zastępowania; ponownie — odrzuć i zamknij |
 
 Wszystkie konfigurowalne w `gtk.toml`, sekcja `[shortcuts]`.
+
+Przycisk „Podyktuj ponownie" jest aktywny tylko przy niepustym zaznaczeniu
+i przy `implicit_replace = true` pełni funkcję informacyjną — pokazuje, że
+zaznaczenie jest uzbrojone. Ukrywanie go byłoby oszczędnością na czytelności:
+mechanizm bez widocznego śladu w oknie jest mechanizmem, o którym nikt się nie
+dowie.
 
 Tekst jest **edytowalny również klawiaturą** — `GtkTextView` nie jest tylko do
 odczytu. Edycje z klawiatury stają się operacjami `SetText` w tym samym logu,
