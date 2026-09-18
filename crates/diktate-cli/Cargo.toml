@@ -13,6 +13,11 @@ clap = { version = "4", features = ["derive"] }
 # workspace.dependencies nie deklaruje `default-features`.
 diktate-core = { path = "../diktate-core", default-features = false }
 hound = "3"
+# rustls, nie natywne TLS: OpenSSL w tym środowisku nie ma nagłówków
+# (patrz CLAUDE.md, „Pułapki tego środowiska”), a pobranie jednego pliku
+# nie jest powodem, żeby wracać do tamtego problemu.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+sha2 = "0.10"
 
 # Przekazanie wyboru backendu dalej do diktate-core. Domyślnie Vulkan — patrz
 # komentarz w crates/diktate-core/Cargo.toml. `diktate-core` ma
