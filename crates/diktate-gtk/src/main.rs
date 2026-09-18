@@ -24,8 +24,8 @@ use diktate_proto::SessionState;
 use gtk4::{PolicyType, ScrolledWindow, Spinner, Stack, TextView, ToggleButton, WrapMode};
 use libadwaita::prelude::*;
 use libadwaita::{
-    Application, ApplicationWindow, Clamp, HeaderBar, StatusPage, Toast, ToastOverlay,
-    ToolbarView, WindowTitle,
+    Application, ApplicationWindow, Clamp, HeaderBar, StatusPage, Toast, ToastOverlay, ToolbarView,
+    WindowTitle,
 };
 use std::rc::Rc;
 
@@ -35,8 +35,6 @@ const APP_ID: &str = "dev.diktate.Gtk";
 /// dyktowania, niepusty — widok tekstu.
 const PAGE_EMPTY: &str = "empty";
 const PAGE_TEXT: &str = "text";
-
-/// Odstęp między mignięciami ikony mikrofonu w trakcie nagrywania.
 
 fn main() -> gtk4::glib::ExitCode {
     // Aplikacja libadwaity sama inicjalizuje bibliotekę i podłącza się pod
@@ -208,13 +206,16 @@ fn build_ui(app: &Application) {
         gtk4::glib::spawn_future_local(async move {
             while let Ok(message) = incoming.recv().await {
                 match message {
-                    Incoming::Segment(text) => {
+                    Incoming::Segment(segment) => {
                         let mut end = buffer_for_incoming.end_iter();
                         if buffer_for_incoming.char_count() > 0 {
                             buffer_for_incoming.insert(&mut end, " ");
                         }
-                        buffer_for_incoming.insert(&mut end, &text);
+                        buffer_for_incoming.insert(&mut end, &segment.text);
                     }
+                    // Wskaźnik poziomu jeszcze nie istnieje — odczyty
+                    // pochłaniamy, żeby kanał nie rósł.
+                    Incoming::Level { .. } => {}
                     Incoming::State { state, backlog } => {
                         window_title_for_incoming.set_subtitle(&subtitle_for_state(state, backlog));
 
@@ -225,7 +226,6 @@ fn build_ui(app: &Application) {
                             backlog_spinner_for_incoming.stop();
                             backlog_spinner_for_incoming.set_visible(false);
                         }
-
                     }
                 }
             }

@@ -8,7 +8,9 @@ use diktate_core::vad::{Vad, CHUNK_SAMPLES};
 use diktate_core::SAMPLE_RATE;
 
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "testdata/jfk.wav".into());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "testdata/jfk.wav".into());
     let mut reader = hound::WavReader::open(&path)?;
     let spec = reader.spec();
     let samples: Vec<f32> = match spec.sample_format {
@@ -43,9 +45,11 @@ fn main() -> anyhow::Result<()> {
         if let Some(segment) = segmenter.push(chunk, is_speech) {
             emitted += 1;
             println!(
-                "segment #{emitted} domknięty na ramce {i} ({:.2} s od początku): {:.2} s materiału",
+                "segment #{emitted} domknięty na ramce {i} ({:.2} s od początku), {:.2}–{:.2} s w osi czasu: {:.2} s materiału",
                 (i * CHUNK_SAMPLES) as f32 / SAMPLE_RATE as f32,
-                segment.len() as f32 / SAMPLE_RATE as f32
+                segment.start_ms() as f32 / 1000.0,
+                segment.end_ms() as f32 / 1000.0,
+                segment.audio.len() as f32 / SAMPLE_RATE as f32
             );
         }
     }
@@ -53,7 +57,7 @@ fn main() -> anyhow::Result<()> {
         emitted += 1;
         println!(
             "segment #{emitted} domknięty dopiero przez flush(): {:.2} s materiału",
-            segment.len() as f32 / SAMPLE_RATE as f32
+            segment.audio.len() as f32 / SAMPLE_RATE as f32
         );
     }
     println!(

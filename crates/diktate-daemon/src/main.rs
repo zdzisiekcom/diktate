@@ -2,7 +2,7 @@
 //!
 //! Jeden klient naraz, obsługiwany sekwencyjnie. Sesja (`Session`) po
 //! `session.start` nagrywa i transkrybuje w tle na własnych wątkach — gotowe
-//! segmenty wracają do klienta powiadomieniami `segment.final`, niezależnie
+//! segmenty wracają do klienta powiadomieniami `segment.added`, niezależnie
 //! od pętli obsługującej żądania na tym samym gnieździe. Dlatego strumień do
 //! zapisu jest dzielony przez `Arc<Mutex<UnixStream>>`: i pętla żądań
 //! (odpowiedzi), i wątek transkrypcji sesji (powiadomienia) piszą do niego
@@ -10,11 +10,12 @@
 use anyhow::{anyhow, Context, Result};
 use diktate_core::{transcribe::default_model_path, Session, Transcriber};
 use diktate_proto::{
-    socket_path, Notification, Request, Response, SessionState, METHOD_SESSION_START,
-    METHOD_SESSION_STOP,
+    socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
+    METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
@@ -54,6 +55,9 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
     let writer = Arc::new(Mutex::new(writer));
     let reader = BufReader::new(stream);
     let mut session: Option<Session> = None;
+    // `audio.level` to kilkanaście wiadomości na sekundę — dostaje je
+    // wyłącznie klient, który poprosił o nie jawnie (docs/02).
+    let levels_wanted = Arc::new(AtomicBool::new(false));
 
     for line in reader.lines() {
         let line = line.context("nie udało się odczytać linii z gniazda")?;
@@ -79,11 +83,23 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                 }
                 let notify_writer = Arc::clone(&writer);
                 let backlog_writer = Arc::clone(&writer);
+                let level_writer = Arc::clone(&writer);
+                let level_flag = Arc::clone(&levels_wanted);
                 match Session::start(
                     Arc::clone(transcriber),
-                    move |text| {
-                        eprintln!("diktate-daemon: {text}");
-                        if let Err(err) = send(&notify_writer, &Notification::segment_final(text))
+                    move |segment| {
+                        eprintln!(
+                            "diktate-daemon: [{}] {} ({}–{} ms)",
+                            segment.seq, segment.text, segment.audio_start_ms, segment.audio_end_ms
+                        );
+                        let params = SegmentAdded {
+                            seq: segment.seq,
+                            text: segment.text,
+                            audio_start_ms: segment.audio_start_ms,
+                            audio_end_ms: segment.audio_end_ms,
+                        };
+                        if let Err(err) =
+                            send(&notify_writer, &Notification::segment_added(&params))
                         {
                             eprintln!(
                                 "diktate-daemon: nie udało się wysłać powiadomienia: {err:#}"
@@ -101,14 +117,27 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                             );
                         }
                     },
+                    move |level| {
+                        if !level_flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        // Poziom jest wyłącznie wizualizacją — jeśli nie da
+                        // się go wysłać, milczymy: zaśmiecanie logu dwudziestoma
+                        // komunikatami na sekundę byłoby gorsze od braku wskaźnika.
+                        let _ = send(
+                            &level_writer,
+                            &Notification::audio_level(level.rms, level.peak),
+                        );
+                    },
                 ) {
                     Ok(new_session) => {
                         session = Some(new_session);
                         send(&writer, &Response::ok(request.id))?;
                         eprintln!("diktate-daemon: nagrywam (strumieniowo)");
-                        if let Err(err) =
-                            send(&writer, &Notification::state_changed(SessionState::Recording, 0))
-                        {
+                        if let Err(err) = send(
+                            &writer,
+                            &Notification::state_changed(SessionState::Recording, 0),
+                        ) {
                             eprintln!(
                                 "diktate-daemon: nie udało się wysłać powiadomienia o stanie: {err:#}"
                             );
@@ -121,6 +150,11 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                         )?;
                     }
                 }
+            }
+            METHOD_SESSION_SUBSCRIBE => {
+                let wanted = request.params.unwrap_or_default().levels;
+                levels_wanted.store(wanted, Ordering::Relaxed);
+                send(&writer, &Response::ok(request.id))?;
             }
             METHOD_SESSION_STOP => {
                 let Some(active) = session.take() else {
@@ -175,8 +209,7 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                 // Klient już nie czyta z gniazda, ale wysyłamy mimo to —
                 // to spójne z resztą kodu i nieszkodliwe (co najwyżej
                 // zapis się nie uda, co i tak tylko logujemy).
-                if let Err(err) =
-                    send(&writer, &Notification::state_changed(SessionState::Idle, 0))
+                if let Err(err) = send(&writer, &Notification::state_changed(SessionState::Idle, 0))
                 {
                     eprintln!(
                         "diktate-daemon: nie udało się wysłać powiadomienia o stanie: {err:#}"
@@ -184,9 +217,7 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                 }
             }
             Err(err) => {
-                eprintln!(
-                    "diktate-daemon: błąd zatrzymania sesji po rozłączeniu klienta: {err:#}"
-                );
+                eprintln!("diktate-daemon: błąd zatrzymania sesji po rozłączeniu klienta: {err:#}");
             }
         }
     }

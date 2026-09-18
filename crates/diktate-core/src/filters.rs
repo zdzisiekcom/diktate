@@ -70,8 +70,7 @@ pub fn is_hallucination(text: &str) -> bool {
 /// tylko zamyka tekst (a nie obejmuje go całego), nie jest tu łapany celowo —
 /// to normalna interpunkcja w środku prawdziwego zdania.
 fn is_bracket_marker(text: &str) -> bool {
-    (text.starts_with('[') && text.ends_with(']'))
-        || (text.starts_with('(') && text.ends_with(')'))
+    (text.starts_with('[') && text.ends_with(']')) || (text.starts_with('(') && text.ends_with(')'))
 }
 
 /// Porównuje `text` z listą znanych formułek — po obcięciu interpunkcji

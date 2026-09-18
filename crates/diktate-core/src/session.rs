@@ -37,7 +37,8 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::capture::{Recorder, StreamingRecording};
 use crate::filters;
-use crate::segmenter::{Segmenter, SegmenterConfig};
+use crate::level::{Level, LevelMeter, DEFAULT_INTERVAL_MS};
+use crate::segmenter::{Segment, Segmenter, SegmenterConfig};
 use crate::transcribe::Transcriber;
 use crate::vad::{Vad, CHUNK_SAMPLES};
 
@@ -118,6 +119,23 @@ impl<G: Fn(u32)> Backlog<G> {
     }
 }
 
+/// Gotowa wypowiedź po transkrypcji — to, co daemon rozgłasza jako
+/// `segment.added` (`docs/02-protokol-ipc.md`).
+///
+/// `seq` jest monotoniczny i nadawany w chwili domknięcia segmentu przez
+/// VAD, czyli **w kolejności wypowiadania**. Kolejność dotarcia do klienta
+/// może być inna przy zaległościach kolejki, dlatego o miejscu w dokumencie
+/// rozstrzyga oś czasu audio (`audio_start_ms`), a nie moment przybycia.
+/// Dziura w numeracji oznacza wypowiedź porzuconą z powodu przepełnionej
+/// kolejki — świadomie widoczną, a nie zamiecioną pod dywan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscribedSegment {
+    pub seq: u64,
+    pub text: String,
+    pub audio_start_ms: u64,
+    pub audio_end_ms: u64,
+}
+
 /// Trwająca sesja: przechwytywanie + VAD + segmentacja + transkrypcja na
 /// bieżąco. Gotowy tekst każdego segmentu trafia do `on_segment` podanego
 /// przy [`Session::start`].
@@ -135,10 +153,19 @@ impl Session {
     /// zaległości kolejki transkrypcji (segmenty czekające plus ten aktualnie
     /// transkrybowany) — patrz [`Backlog`]. Musi być `Send + Sync + 'static`,
     /// bo jest dzielone między wątek segmentujący i wątek transkrypcji.
-    pub fn start<F, G>(transcriber: Arc<Transcriber>, on_segment: F, on_backlog: G) -> Result<Self>
+    /// `on_level` dostaje odczyt poziomu sygnału ~20 razy na sekundę —
+    /// wskaźnik w oknie ma pokazać brak wychyleń natychmiast, zanim ktoś
+    /// przedyktuje minutę do wyłączonego mikrofonu.
+    pub fn start<F, G, L>(
+        transcriber: Arc<Transcriber>,
+        on_segment: F,
+        on_backlog: G,
+        on_level: L,
+    ) -> Result<Self>
     where
-        F: Fn(String) + Send + 'static,
+        F: Fn(TranscribedSegment) + Send + 'static,
         G: Fn(u32) + Send + Sync + 'static,
+        L: Fn(Level) + Send + 'static,
     {
         let vad = Vad::new().context("nie udało się utworzyć detektora VAD")?;
         let segmenter = Segmenter::new(SegmenterConfig::default());
@@ -147,12 +174,19 @@ impl Session {
         let capture = Recorder::start_streaming(chunk_tx)
             .context("nie udało się uruchomić przechwytywania strumieniowego")?;
 
-        let (segment_tx, segment_rx) = mpsc::sync_channel::<Vec<f32>>(SEGMENT_QUEUE_CAPACITY);
+        let (segment_tx, segment_rx) = mpsc::sync_channel::<(u64, Segment)>(SEGMENT_QUEUE_CAPACITY);
         let backlog = Arc::new(Backlog::new(on_backlog));
 
         let segmenter_backlog = Arc::clone(&backlog);
         let segmenter_handle = std::thread::spawn(move || {
-            run_segmenter(chunk_rx, segment_tx, vad, segmenter, &segmenter_backlog);
+            run_segmenter(
+                chunk_rx,
+                segment_tx,
+                vad,
+                segmenter,
+                &segmenter_backlog,
+                on_level,
+            );
         });
 
         let transcriber_backlog = Arc::clone(&backlog);
@@ -199,19 +233,28 @@ impl Session {
 /// Ciało wątku segmentującego: porcje z capture -> ramki -> VAD -> Segmenter
 /// -> kolejka do transkrypcji. Kończy się, gdy `chunk_rx` się rozłączy (czyli
 /// po `capture.stop()`), po czym domyka ewentualny trwający segment.
-fn run_segmenter<G: Fn(u32)>(
+fn run_segmenter<G: Fn(u32), L: Fn(Level)>(
     chunk_rx: Receiver<Vec<f32>>,
-    segment_tx: SyncSender<Vec<f32>>,
+    segment_tx: SyncSender<(u64, Segment)>,
     mut vad: Vad,
     mut segmenter: Segmenter,
     backlog: &Backlog<G>,
+    on_level: L,
 ) {
     let mut assembler = FrameAssembler::new();
+    let mut meter = LevelMeter::new(DEFAULT_INTERVAL_MS);
+    let mut next_seq = 0u64;
     while let Ok(chunk) = chunk_rx.recv() {
+        // Poziom liczymy z surowej porcji, przed złożeniem w ramki VAD —
+        // wskaźnik ma pokazywać wejście, a nie to, co zdążył zobaczyć VAD.
+        if let Some(level) = meter.push(&chunk) {
+            on_level(level);
+        }
         for frame in assembler.push(&chunk) {
             let is_speech = vad.is_speech(&frame);
             if let Some(segment) = segmenter.push(&frame, is_speech) {
-                dispatch_segment(&segment_tx, segment, backlog);
+                dispatch_segment(&segment_tx, next_seq, segment, backlog);
+                next_seq += 1;
             }
         }
     }
@@ -219,7 +262,7 @@ fn run_segmenter<G: Fn(u32)>(
     // jeśli jakiś był. Reszta niedopełniająca pełnej ramki w assemblerze
     // (poniżej 32 ms) przepada; to nieistotna strata na końcu nagrania.
     if let Some(segment) = segmenter.flush() {
-        dispatch_segment(&segment_tx, segment, backlog);
+        dispatch_segment(&segment_tx, next_seq, segment, backlog);
     }
     // `segment_tx` spada tu wraz z końcem funkcji — to sygnał dla wątku
     // transkrypcji, że nic więcej nie przyjdzie.
@@ -231,11 +274,12 @@ fn run_segmenter<G: Fn(u32)>(
 /// ([`Backlog`]) rośnie tylko wtedy, gdy segment faktycznie trafił do
 /// kolejki — porzucony segment nigdy w niej nie był, więc jej nie zwiększa.
 fn dispatch_segment<G: Fn(u32)>(
-    segment_tx: &SyncSender<Vec<f32>>,
-    segment: Vec<f32>,
+    segment_tx: &SyncSender<(u64, Segment)>,
+    seq: u64,
+    segment: Segment,
     backlog: &Backlog<G>,
 ) {
-    match segment_tx.try_send(segment) {
+    match segment_tx.try_send((seq, segment)) {
         Ok(()) => backlog.inc(),
         Err(mpsc::TrySendError::Full(_)) => {
             eprintln!(
@@ -264,17 +308,22 @@ fn dispatch_segment<G: Fn(u32)>(
 /// `on_backlog(0)` zostaje wywołane, nawet jeśli sesja nie miała ani jednego
 /// segmentu.
 fn run_transcriber<F, G: Fn(u32)>(
-    segment_rx: Receiver<Vec<f32>>,
+    segment_rx: Receiver<(u64, Segment)>,
     transcriber: &Transcriber,
     on_segment: F,
     backlog: &Backlog<G>,
 ) where
-    F: Fn(String),
+    F: Fn(TranscribedSegment),
 {
-    while let Ok(segment) = segment_rx.recv() {
-        match transcriber.transcribe(&segment) {
+    while let Ok((seq, segment)) = segment_rx.recv() {
+        match transcriber.transcribe(&segment.audio) {
             Ok(text) => match filters::clean(&text) {
-                Some(cleaned) => on_segment(cleaned),
+                Some(cleaned) => on_segment(TranscribedSegment {
+                    seq,
+                    text: cleaned,
+                    audio_start_ms: segment.start_ms(),
+                    audio_end_ms: segment.end_ms(),
+                }),
                 None => {
                     // Pusty wynik transkrypcji (brak mowy w segmencie) jest
                     // normalny i nie jest logowany — logujemy tylko, gdy
@@ -353,15 +402,25 @@ mod tests {
         assert!(assembler.buffer.is_empty());
     }
 
+    /// Segment testowy o zadanej wartości próbek — treść audio nie ma tu
+    /// znaczenia, liczy się tylko to, czy trafił do kolejki.
+    fn segment(value: f32) -> Segment {
+        Segment {
+            audio: vec![value],
+            start_sample: 0,
+            end_sample: 1,
+        }
+    }
+
     #[test]
     fn dispatch_segment_porzuca_gdy_kolejka_pelna_nie_blokujac() {
-        let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(1);
+        let (tx, rx) = mpsc::sync_channel::<(u64, Segment)>(1);
         let backlog = Backlog::new(|_| {});
-        dispatch_segment(&tx, vec![1.0], &backlog);
+        dispatch_segment(&tx, 0, segment(1.0), &backlog);
         // Kolejka ma pojemność 1 i jest teraz pełna — drugie wysłanie musi
         // się nie zablokować, tylko porzucić segment.
-        dispatch_segment(&tx, vec![2.0], &backlog);
-        assert_eq!(rx.try_recv().unwrap(), vec![1.0]);
+        dispatch_segment(&tx, 1, segment(2.0), &backlog);
+        assert_eq!(rx.try_recv().unwrap(), (0, segment(1.0)));
         assert!(rx.try_recv().is_err());
     }
 
@@ -378,11 +437,11 @@ mod tests {
 
     #[test]
     fn backlog_rosnie_przy_udanym_wyslaniu_segmentu() {
-        let (tx, _rx) = mpsc::sync_channel::<Vec<f32>>(8);
+        let (tx, _rx) = mpsc::sync_channel::<(u64, Segment)>(8);
         let (backlog, history) = backlog_z_historia();
 
-        dispatch_segment(&tx, vec![1.0], &backlog);
-        dispatch_segment(&tx, vec![2.0], &backlog);
+        dispatch_segment(&tx, 0, segment(1.0), &backlog);
+        dispatch_segment(&tx, 1, segment(2.0), &backlog);
 
         assert_eq!(backlog.count.load(Ordering::SeqCst), 2);
         assert_eq!(*history.borrow(), vec![1, 2]);
@@ -390,11 +449,11 @@ mod tests {
 
     #[test]
     fn backlog_nie_rosnie_gdy_segment_porzucony_z_pelnej_kolejki() {
-        let (tx, _rx) = mpsc::sync_channel::<Vec<f32>>(1);
+        let (tx, _rx) = mpsc::sync_channel::<(u64, Segment)>(1);
         let (backlog, history) = backlog_z_historia();
 
-        dispatch_segment(&tx, vec![1.0], &backlog); // trafia do kolejki, licznik = 1
-        dispatch_segment(&tx, vec![2.0], &backlog); // kolejka pełna, porzucony
+        dispatch_segment(&tx, 0, segment(1.0), &backlog); // trafia do kolejki, licznik = 1
+        dispatch_segment(&tx, 1, segment(2.0), &backlog); // kolejka pełna, porzucony
 
         assert_eq!(backlog.count.load(Ordering::SeqCst), 1);
         // Callback wołany tylko raz — przy udanym wysłaniu.

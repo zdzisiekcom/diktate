@@ -210,7 +210,7 @@ Brakujące funkcje to między innymi:
 ## Test IPC
 
 Skrypt `scripts/smoke-ipc.py` testuje protokół IPC daemona
-(wysyła `session.start`, czeka, wysyła `session.stop`, oczekuje na `segment.final`).
+(wysyła `session.start`, czeka, wysyła `session.stop`, oczekuje na `segment.added`).
 Wymaga uruchomionego daemona:
 
 ```bash

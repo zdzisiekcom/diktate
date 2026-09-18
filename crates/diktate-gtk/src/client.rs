@@ -6,8 +6,8 @@
 use anyhow::{anyhow, Context, Result};
 use async_channel::Receiver;
 use diktate_proto::{
-    socket_path, NotificationParams, Outgoing, Request, SessionState, METHOD_SESSION_START,
-    METHOD_SESSION_STOP,
+    socket_path, NotificationParams, Outgoing, Request, SegmentAdded, SessionState, Subscription,
+    METHOD_SESSION_START, METHOD_SESSION_STOP,
 };
 use std::cell::Cell;
 use std::io::{BufRead, BufReader, Write};
@@ -15,11 +15,13 @@ use std::os::unix::net::UnixStream;
 
 /// Wiadomość przerzucona z wątku czytającego gniazdo do pętli GTK.
 ///
-/// `Segment` to gotowy tekst wypowiedzi, `State` to zmiana stanu sesji wraz
-/// z liczbą wypowiedzi czekających na transkrypcję.
+/// `Segment` to gotowa wypowiedź wraz z jej miejscem w osi czasu sesji,
+/// `State` to zmiana stanu sesji wraz z liczbą wypowiedzi czekających na
+/// transkrypcję, `Level` to odczyt poziomu sygnału do wskaźnika.
 pub enum Incoming {
-    Segment(String),
+    Segment(SegmentAdded),
     State { state: SessionState, backlog: u32 },
+    Level { rms: f32, peak: f32 },
 }
 
 pub struct Client {
@@ -47,13 +49,21 @@ impl Client {
                 }
                 match serde_json::from_str::<Outgoing>(&line) {
                     Ok(Outgoing::Notification(notification)) => match notification.params {
-                        NotificationParams::SegmentFinal { text } => {
-                            if tx.send_blocking(Incoming::Segment(text)).is_err() {
+                        NotificationParams::SegmentAdded(segment) => {
+                            if tx.send_blocking(Incoming::Segment(segment)).is_err() {
                                 break;
                             }
                         }
                         NotificationParams::StateChanged { state, backlog } => {
-                            if tx.send_blocking(Incoming::State { state, backlog }).is_err() {
+                            if tx
+                                .send_blocking(Incoming::State { state, backlog })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        NotificationParams::AudioLevel { rms, peak } => {
+                            if tx.send_blocking(Incoming::Level { rms, peak }).is_err() {
                                 break;
                             }
                         }
@@ -80,14 +90,32 @@ impl Client {
         self.send(METHOD_SESSION_START)
     }
 
+    /// Prosi daemona o odczyty poziomu sygnału. Bez tego nie przychodzą —
+    /// to kilkanaście wiadomości na sekundę i dostaje je tylko ten, kto
+    /// rysuje wskaźnik.
+    pub fn subscribe_levels(&self) -> Result<()> {
+        self.send_request(&Request::subscribe(
+            self.take_id(),
+            Subscription { levels: true },
+        ))
+    }
+
     pub fn stop(&self) -> Result<()> {
         self.send(METHOD_SESSION_STOP)
     }
 
-    fn send(&self, method: &str) -> Result<()> {
+    fn take_id(&self) -> u64 {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
-        let line = serde_json::to_string(&Request::new(id, method))
+        id
+    }
+
+    fn send(&self, method: &str) -> Result<()> {
+        self.send_request(&Request::new(self.take_id(), method))
+    }
+
+    fn send_request(&self, request: &Request) -> Result<()> {
+        let line = serde_json::to_string(request)
             .map_err(|err| anyhow!("nie udało się zserializować żądania: {err}"))?;
         let mut writer = self.writer.borrow_mut();
         writer

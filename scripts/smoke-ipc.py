@@ -2,7 +2,7 @@
 """
 Smoke test for diktate daemon IPC communication.
 Sends session.start, waits 2 seconds, sends session.stop,
-and waits for optional segment.final notification.
+and waits for optional segment.added notification.
 """
 
 import json
@@ -107,8 +107,8 @@ def main():
             print("Error: No 'result' or 'error' field in response")
             success = False
 
-    # Wait for optional segment.final notification
-    print("\n=== Phase 3: Waiting for segment.final notification (up to 60 seconds) ===")
+    # Wait for optional segment.added notification
+    print("\n=== Phase 3: Waiting for segment.added notification (up to 60 seconds) ===")
     start_time = time.time()
     notification_received = False
 
@@ -121,7 +121,7 @@ def main():
 
         print(f"← Received: {json.dumps(notification)}")
 
-        if "method" in notification and notification["method"] == "segment.final":
+        if "method" in notification and notification["method"] == "segment.added":
             notification_received = True
             if "params" in notification and "text" in notification["params"]:
                 text = notification["params"]["text"]
@@ -129,7 +129,7 @@ def main():
             break
 
     if not notification_received:
-        print("No segment.final notification received (this is normal if recording was silent)")
+        print("No segment.added notification received (this is normal if recording was silent)")
 
     sock.close()
 

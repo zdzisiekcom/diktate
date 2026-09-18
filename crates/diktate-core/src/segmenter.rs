@@ -78,6 +78,10 @@ fn ms_to_samples(ms: u32) -> usize {
     (ms as u64 * SAMPLE_RATE as u64 / 1000) as usize
 }
 
+fn samples_to_ms(samples: usize) -> u64 {
+    samples as u64 * 1000 / SAMPLE_RATE as u64
+}
+
 /// Wewnętrzny stan maszyny.
 enum State {
     /// Nasłuch: `preroll` to bufor kroczący, capped na `pre_roll_samples`.
@@ -92,6 +96,35 @@ enum State {
     },
 }
 
+/// Gotowa wypowiedź wraz z jej położeniem w osi czasu sesji.
+///
+/// Oś czasu audio — a nie kolejność przybycia — jest jedynym prawdziwym
+/// porządkiem wypowiedzi (`docs/02-protokol-ipc.md`): przy zaległościach
+/// kolejki transkrypcji segment wypowiedziany wcześniej potrafi dotrzeć do
+/// klienta później. Dlatego segmenter podaje pozycję wycinka w próbkach od
+/// początku sesji, a nie tylko same próbki.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Segment {
+    /// Próbki wypowiedzi (mono, 16 kHz) wraz z pre-rollem i ciszą domykającą.
+    pub audio: Vec<f32>,
+    /// Numer pierwszej próbki segmentu, licząc od początku sesji.
+    pub start_sample: usize,
+    /// Numer próbki tuż za ostatnią próbką segmentu.
+    pub end_sample: usize,
+}
+
+impl Segment {
+    /// Początek segmentu w milisekundach od startu sesji.
+    pub fn start_ms(&self) -> u64 {
+        samples_to_ms(self.start_sample)
+    }
+
+    /// Koniec segmentu w milisekundach od startu sesji.
+    pub fn end_ms(&self) -> u64 {
+        samples_to_ms(self.end_sample)
+    }
+}
+
 /// Składa strumień ramek (z decyzją VAD dla każdej) w segmenty wypowiedzi.
 pub struct Segmenter {
     pre_roll_samples: usize,
@@ -101,6 +134,9 @@ pub struct Segmenter {
     long_silence_samples: usize,
     max_segment_samples: usize,
     state: State,
+    /// Liczba próbek przyjętych od początku sesji — oś czasu, w której
+    /// osadzany jest każdy zwrócony [`Segment`].
+    consumed: usize,
 }
 
 impl Segmenter {
@@ -115,6 +151,7 @@ impl Segmenter {
             state: State::Idle {
                 preroll: VecDeque::new(),
             },
+            consumed: 0,
         }
     }
 
@@ -122,7 +159,8 @@ impl Segmenter {
     /// właśnie domknął (przez hangover, limit długości albo odrzucenie jako
     /// zbyt krótki — w tym ostatnim przypadku zwraca `None`, tak jak przy
     /// braku domknięcia).
-    pub fn push(&mut self, chunk: &[f32], is_speech: bool) -> Option<Vec<f32>> {
+    pub fn push(&mut self, chunk: &[f32], is_speech: bool) -> Option<Segment> {
+        self.consumed += chunk.len();
         let state = std::mem::replace(
             &mut self.state,
             State::Idle {
@@ -166,7 +204,7 @@ impl Segmenter {
 
     /// Domyka trwający segment na koniec sesji (ta sama reguła
     /// `min_speech_ms` co w `push`). Bez trwającego segmentu — `None`.
-    pub fn flush(&mut self) -> Option<Vec<f32>> {
+    pub fn flush(&mut self) -> Option<Segment> {
         let state = std::mem::replace(
             &mut self.state,
             State::Idle {
@@ -179,7 +217,7 @@ impl Segmenter {
                 buffer,
                 speech_samples,
                 ..
-            } => self.finalize(buffer, speech_samples),
+            } => self.finalize(buffer, speech_samples, self.consumed),
         }
     }
 
@@ -192,13 +230,15 @@ impl Segmenter {
         speech_samples: usize,
         silence_run: usize,
         is_speech: bool,
-    ) -> (State, Option<Vec<f32>>) {
+    ) -> (State, Option<Segment>) {
         if buffer.len() >= self.max_segment_samples {
             // Twardy limit: tniemy dokładnie na granicy, nadmiar (z tej
             // samej ramki, która przekroczyła limit) idzie dalej — jako
             // ciąg dalszy mowy albo jako nowy bufor kroczący ciszy.
             let overflow = buffer.split_off(self.max_segment_samples);
-            let result = self.finalize(buffer, speech_samples);
+            // Nadmiar wraca do następnego segmentu, więc ten kończy się
+            // tyle próbek przed bieżącą pozycją, ile go odłożyliśmy.
+            let result = self.finalize(buffer, speech_samples, self.consumed - overflow.len());
             let new_state = if overflow.is_empty() {
                 State::Idle {
                     preroll: VecDeque::new(),
@@ -218,7 +258,8 @@ impl Segmenter {
             };
             (new_state, result)
         } else if silence_run >= self.long_silence_samples
-            || (silence_run >= self.hangover_samples && speech_samples >= self.target_speech_samples)
+            || (silence_run >= self.hangover_samples
+                && speech_samples >= self.target_speech_samples)
         {
             // Domykamy albo bo cisza jest już na tyle długa, że to wyraźna
             // przerwa (niezależnie od zebranej mowy), albo bo zwykły
@@ -226,7 +267,7 @@ impl Segmenter {
             // stała stawka transkrypcji się opłaca. W przeciwnym razie
             // (krótka pauza, za mało mowy) segment zostaje otwarty i
             // zbiera dalej — trafiamy do gałęzi `else` niżej.
-            let result = self.finalize(buffer, speech_samples);
+            let result = self.finalize(buffer, speech_samples, self.consumed);
             (
                 State::Idle {
                     preroll: VecDeque::new(),
@@ -246,12 +287,22 @@ impl Segmenter {
     }
 
     /// Odrzuca segment, w którym mowy było mniej niż `min_speech_samples`.
-    fn finalize(&self, buffer: Vec<f32>, speech_samples: usize) -> Option<Vec<f32>> {
-        if speech_samples >= self.min_speech_samples {
-            Some(buffer)
-        } else {
-            None
+    /// `end_sample` to pozycja tuż za ostatnią próbką segmentu w osi czasu
+    /// sesji; początek wynika z niej i z długości bufora.
+    fn finalize(
+        &self,
+        buffer: Vec<f32>,
+        speech_samples: usize,
+        end_sample: usize,
+    ) -> Option<Segment> {
+        if speech_samples < self.min_speech_samples {
+            return None;
         }
+        Some(Segment {
+            start_sample: end_sample - buffer.len(),
+            end_sample,
+            audio: buffer,
+        })
     }
 }
 
@@ -318,7 +369,7 @@ mod tests {
         assert!(silence_before * CHUNK <= pre_roll_samples);
         let expected_len =
             silence_before * CHUNK + speech_frames * CHUNK + silence_frames_needed * CHUNK;
-        assert_eq!(segment.len(), expected_len);
+        assert_eq!(segment.audio.len(), expected_len);
 
         // Kolejna cisza już nie zwraca niczego — segment wrócił dokładnie raz.
         assert!(seg.push(&frame(0.0), false).is_none());
@@ -361,9 +412,9 @@ mod tests {
         let segment = segment.expect("segment powinien się domknąć");
 
         // Pierwsze `pre_roll_samples` próbek to bufor kroczący (wartość 9.0).
-        assert!(segment[..pre_roll_samples].iter().all(|&s| s == 9.0));
+        assert!(segment.audio[..pre_roll_samples].iter().all(|&s| s == 9.0));
         // Zaraz po nim — ramka mowy (wartość 3.0).
-        assert!(segment[pre_roll_samples..pre_roll_samples + CHUNK]
+        assert!(segment.audio[pre_roll_samples..pre_roll_samples + CHUNK]
             .iter()
             .all(|&s| s == 3.0));
     }
@@ -401,7 +452,10 @@ mod tests {
                 result = Some(s);
             }
         }
-        assert!(result.is_some(), "po odrzuceniu stuknięcia segmenter powinien działać dalej");
+        assert!(
+            result.is_some(),
+            "po odrzuceniu stuknięcia segmenter powinien działać dalej"
+        );
     }
 
     #[test]
@@ -430,7 +484,7 @@ mod tests {
         }
 
         let segment = result.expect("segment powinien zostać przycięty i zwrócony");
-        assert_eq!(segment.len(), max_samples);
+        assert_eq!(segment.audio.len(), max_samples);
     }
 
     #[test]
@@ -440,8 +494,10 @@ mod tests {
         for _ in 0..speech_frames {
             assert!(seg.push(&frame(1.0), true).is_none());
         }
-        let segment = seg.flush().expect("flush powinien domknąć trwający segment");
-        assert_eq!(segment.len(), speech_frames * CHUNK);
+        let segment = seg
+            .flush()
+            .expect("flush powinien domknąć trwający segment");
+        assert_eq!(segment.audio.len(), speech_frames * CHUNK);
 
         // Po flushu nie ma już nic do domknięcia.
         assert!(seg.flush().is_none());
@@ -486,11 +542,9 @@ mod tests {
 
         // Dopiero flush domyka — potwierdza, że przez cały czas był to
         // jeden, wciąż otwarty segment, a nie dwa oddzielnie zwrócone.
-        let segment = seg
-            .flush()
-            .expect("flush powinien domknąć zebrany segment");
+        let segment = seg.flush().expect("flush powinien domknąć zebrany segment");
         let expected_len = (6 + pause_frames + 6) * CHUNK;
-        assert_eq!(segment.len(), expected_len);
+        assert_eq!(segment.audio.len(), expected_len);
     }
 
     #[test]
@@ -563,5 +617,115 @@ mod tests {
         }
 
         result.expect("segment z materiałem powyżej targetu powinien domknąć się na hangoverze");
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    const CHUNK: usize = 512;
+
+    fn frame(value: f32) -> Vec<f32> {
+        vec![value; CHUNK]
+    }
+
+    #[test]
+    fn segment_niesie_swoje_polozenie_w_osi_czasu_sesji() {
+        // Oś czasu audio jest jedynym prawdziwym porządkiem wypowiedzi
+        // (docs/02), więc segmenter musi podać, gdzie w nagraniu leży
+        // zwrócony wycinek — a nie tylko same próbki.
+        let config = SegmenterConfig {
+            target_speech_ms: 0,
+            ..SegmenterConfig::default()
+        };
+        let pre_roll_samples = ms_to_samples(config.pre_roll_ms);
+        let hangover_samples = ms_to_samples(config.hangover_ms);
+        let mut seg = Segmenter::new(config);
+
+        // Dużo ciszy na początku — więcej, niż mieści pre-roll, żeby
+        // początek segmentu nie wypadł przypadkiem na zerze.
+        let silence_before = 40;
+        for _ in 0..silence_before {
+            assert!(seg.push(&frame(0.0), false).is_none());
+        }
+        let speech_frames = 12;
+        for _ in 0..speech_frames {
+            assert!(seg.push(&frame(1.0), true).is_none());
+        }
+        let silence_frames = hangover_samples.div_ceil(CHUNK);
+        let mut result = None;
+        for _ in 0..silence_frames {
+            result = seg.push(&frame(0.0), false).or(result);
+        }
+
+        let segment = result.expect("segment powinien się domknąć");
+        let consumed = (silence_before + speech_frames + silence_frames) * CHUNK;
+        assert_eq!(segment.end_sample, consumed);
+        assert_eq!(segment.start_sample, consumed - segment.audio.len());
+        // Segment zaczyna się dokładnie o pre-roll przed pierwszą ramką mowy.
+        assert_eq!(
+            segment.start_sample,
+            silence_before * CHUNK - pre_roll_samples
+        );
+    }
+
+    #[test]
+    fn kolejne_segmenty_nie_nachodza_na_siebie_w_osi_czasu() {
+        let config = SegmenterConfig {
+            target_speech_ms: 0,
+            pre_roll_ms: 0,
+            ..SegmenterConfig::default()
+        };
+        let hangover_samples = ms_to_samples(config.hangover_ms);
+        let mut seg = Segmenter::new(config);
+        let silence_frames = hangover_samples.div_ceil(CHUNK);
+
+        let mut segments = Vec::new();
+        for _ in 0..2 {
+            for _ in 0..12 {
+                if let Some(s) = seg.push(&frame(1.0), true) {
+                    segments.push(s);
+                }
+            }
+            for _ in 0..silence_frames {
+                if let Some(s) = seg.push(&frame(0.0), false) {
+                    segments.push(s);
+                }
+            }
+        }
+
+        assert_eq!(segments.len(), 2);
+        assert!(
+            segments[0].end_sample <= segments[1].start_sample,
+            "segmenty nachodzą na siebie: {} > {}",
+            segments[0].end_sample,
+            segments[1].start_sample
+        );
+    }
+
+    #[test]
+    fn pozycja_w_probkach_przelicza_sie_na_milisekundy() {
+        // 16 kHz: 16 próbek to 1 ms. Tę zamianę robi segmenter, bo tylko on
+        // zna częstotliwość próbkowania strumienia.
+        let segment = Segment {
+            audio: vec![0.0; SAMPLE_RATE as usize],
+            start_sample: SAMPLE_RATE as usize / 2,
+            end_sample: SAMPLE_RATE as usize + SAMPLE_RATE as usize / 2,
+        };
+        assert_eq!(segment.start_ms(), 500);
+        assert_eq!(segment.end_ms(), 1_500);
+    }
+
+    #[test]
+    fn flush_domyka_segment_z_poprawnym_konncem_osi_czasu() {
+        let mut seg = Segmenter::new(SegmenterConfig::default());
+        let frames = 20;
+        for _ in 0..frames {
+            assert!(seg.push(&frame(1.0), true).is_none());
+        }
+        let segment = seg.flush().expect("flush domyka trwający segment");
+        assert_eq!(segment.end_sample, frames * CHUNK);
+        assert_eq!(segment.start_sample, 0);
     }
 }
