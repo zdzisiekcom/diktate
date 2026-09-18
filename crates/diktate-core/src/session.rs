@@ -42,9 +42,31 @@ use crate::segmenter::{Segment, Segmenter, SegmenterConfig};
 use crate::transcribe::Transcriber;
 use crate::vad::{Vad, CHUNK_SAMPLES};
 
-/// Pojemność kanału między wątkiem segmentującym a wątkiem transkrypcji.
-/// Patrz komentarz modułu — to celowy, twardy limit.
-const SEGMENT_QUEUE_CAPACITY: usize = 8;
+/// Parametry sesji — wszystkie pochodzą z `daemon.toml` (`docs/04`).
+/// Wartości domyślne są tu tylko po to, żeby brak pliku nie blokował startu.
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    /// Progi składania ramek w wypowiedzi.
+    pub segmenter: SegmenterConfig,
+    /// Próg decyzyjny Silero (0.0–1.0).
+    pub vad_threshold: f32,
+    /// Ile wypowiedzi może czekać na transkrypcję. Limit jest celowy — patrz
+    /// komentarz modułu.
+    pub queue_capacity: usize,
+    /// Odstęp między odczytami poziomu sygnału.
+    pub level_interval_ms: u32,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            segmenter: SegmenterConfig::default(),
+            vad_threshold: 0.5,
+            queue_capacity: 8,
+            level_interval_ms: DEFAULT_INTERVAL_MS,
+        }
+    }
+}
 
 /// Skleja porcje o dowolnej, nierównej długości (takie, jakie dają callbacki
 /// `cpal`) w ramki o stałym rozmiarze [`CHUNK_SAMPLES`], wymaganym przez VAD.
@@ -158,6 +180,7 @@ impl Session {
     /// przedyktuje minutę do wyłączonego mikrofonu.
     pub fn start<F, G, L>(
         transcriber: Arc<Transcriber>,
+        config: SessionConfig,
         on_segment: F,
         on_backlog: G,
         on_level: L,
@@ -167,14 +190,16 @@ impl Session {
         G: Fn(u32) + Send + Sync + 'static,
         L: Fn(Level) + Send + 'static,
     {
-        let vad = Vad::new().context("nie udało się utworzyć detektora VAD")?;
-        let segmenter = Segmenter::new(SegmenterConfig::default());
+        let vad = Vad::new()
+            .context("nie udało się utworzyć detektora VAD")?
+            .with_threshold(config.vad_threshold);
+        let segmenter = Segmenter::new(config.segmenter);
 
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<f32>>();
         let capture = Recorder::start_streaming(chunk_tx)
             .context("nie udało się uruchomić przechwytywania strumieniowego")?;
 
-        let (segment_tx, segment_rx) = mpsc::sync_channel::<(u64, Segment)>(SEGMENT_QUEUE_CAPACITY);
+        let (segment_tx, segment_rx) = mpsc::sync_channel::<(u64, Segment)>(config.queue_capacity);
         let backlog = Arc::new(Backlog::new(on_backlog));
 
         let segmenter_backlog = Arc::clone(&backlog);
@@ -186,6 +211,7 @@ impl Session {
                 segmenter,
                 &segmenter_backlog,
                 on_level,
+                config.level_interval_ms,
             );
         });
 
@@ -240,9 +266,10 @@ fn run_segmenter<G: Fn(u32), L: Fn(Level)>(
     mut segmenter: Segmenter,
     backlog: &Backlog<G>,
     on_level: L,
+    level_interval_ms: u32,
 ) {
     let mut assembler = FrameAssembler::new();
-    let mut meter = LevelMeter::new(DEFAULT_INTERVAL_MS);
+    let mut meter = LevelMeter::new(level_interval_ms);
     let mut next_seq = 0u64;
     while let Ok(chunk) = chunk_rx.recv() {
         // Poziom liczymy z surowej porcji, przed złożeniem w ramki VAD —

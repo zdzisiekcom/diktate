@@ -23,7 +23,7 @@ mod client;
 mod view;
 
 use client::{Client, Incoming};
-use diktate_document::Normalization;
+use diktate_config::GtkConfig;
 use diktate_proto::SessionState;
 use gtk4::{PolicyType, ScrolledWindow, Spinner, Stack, TextView, ToggleButton, WrapMode};
 use libadwaita::prelude::*;
@@ -101,6 +101,16 @@ fn subtitle_for_state(state: SessionState, backlog: u32) -> String {
 }
 
 fn build_ui(app: &Application) {
+    // Błąd w gtk.toml zatrzymuje start z czytelnym komunikatem, a nie cofa
+    // się po cichu do wartości domyślnych (docs/04).
+    let config = match GtkConfig::load() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("diktate-gtk: {err:#}");
+            std::process::exit(1);
+        }
+    };
+
     let text_view = TextView::builder()
         .wrap_mode(WrapMode::WordChar)
         .left_margin(12)
@@ -169,8 +179,8 @@ fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Diktate")
-        .default_width(560)
-        .default_height(420)
+        .default_width(config.window.width)
+        .default_height(config.window.height)
         .content(&toolbar_view)
         .build();
 
@@ -179,7 +189,7 @@ fn build_ui(app: &Application) {
     // użytkownika (wymaganie: powrót do `StatusPage` po wyczyszczeniu).
     // Model dokumentu podpięty pod bufor. Od tej chwili bufor jest widokiem,
     // a nie źródłem prawdy.
-    let document = DocumentView::attach(&text_view, Normalization::default());
+    let document = DocumentView::attach(&text_view, config.dictation.clone());
 
     let buffer = text_view.buffer();
     let stack_for_buffer = stack.clone();

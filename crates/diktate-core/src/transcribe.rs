@@ -1,7 +1,8 @@
 //! Transkrypcja przez whisper.cpp (`whisper-rs`).
 //!
-//! Etap 0: backend CPU, jeden przebieg po całym nagraniu, język ustawiony na
-//! polski na sztywno. Model ładowany raz i trzymany w pamięci.
+//! Model ładowany raz i trzymany w pamięci. Parametry dekodowania pochodzą
+//! z `daemon.toml` (`docs/04`) — w kodzie nie ma dla nich magicznych
+//! stałych, są tylko wartości domyślne.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
@@ -10,6 +11,13 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 pub struct Transcriber {
     ctx: WhisperContext,
     language: String,
+    /// Podpowiedź kontekstowa doklejana do promptu: terminologia, nazwy
+    /// własne. Puste = bez podpowiedzi.
+    initial_prompt: String,
+    /// Szerokość wiązki; 1 oznacza dekodowanie zachłanne.
+    beam_size: u32,
+    /// Liczba wątków; 0 zostawia decyzję whisperowi.
+    threads: u32,
 }
 
 impl Transcriber {
@@ -27,11 +35,30 @@ impl Transcriber {
         Ok(Self {
             ctx,
             language: "pl".to_string(),
+            initial_prompt: String::new(),
+            beam_size: 1,
+            threads: 0,
         })
     }
 
     pub fn with_language(mut self, language: impl Into<String>) -> Self {
         self.language = language.into();
+        self
+    }
+
+    pub fn with_initial_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.initial_prompt = prompt.into();
+        self
+    }
+
+    /// Szerokość wiązki; 0 i 1 znaczą to samo — dekodowanie zachłanne.
+    pub fn with_beam_size(mut self, beam_size: u32) -> Self {
+        self.beam_size = beam_size;
+        self
+    }
+
+    pub fn with_threads(mut self, threads: u32) -> Self {
+        self.threads = threads;
         self
     }
 
@@ -41,8 +68,22 @@ impl Transcriber {
             return Ok(String::new());
         }
 
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let strategy = if self.beam_size > 1 {
+            SamplingStrategy::BeamSearch {
+                beam_size: self.beam_size as i32,
+                patience: 0.0,
+            }
+        } else {
+            SamplingStrategy::Greedy { best_of: 1 }
+        };
+        let mut params = FullParams::new(strategy);
         params.set_language(Some(&self.language));
+        if !self.initial_prompt.is_empty() {
+            params.set_initial_prompt(&self.initial_prompt);
+        }
+        if self.threads > 0 {
+            params.set_n_threads(self.threads as i32);
+        }
         params.set_translate(false);
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -72,7 +113,8 @@ impl Transcriber {
     }
 }
 
-/// Domyślna ścieżka modelu — do etapu 0 stała, bez konfiguracji.
+/// Ścieżka modelu, gdy `daemon.toml` jej nie podaje: `$DIKTATE_MODEL`, a w
+/// ostateczności `~/models/whisper/ggml-small.bin`.
 pub fn default_model_path() -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("DIKTATE_MODEL") {
         return std::path::PathBuf::from(path);

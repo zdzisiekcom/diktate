@@ -8,7 +8,9 @@
 //! (odpowiedzi), i wątek transkrypcji sesji (powiadomienia) piszą do niego
 //! pod tym samym zamkiem, żeby żadna linia NDJSON się nie przeplotła.
 use anyhow::{anyhow, Context, Result};
-use diktate_core::{transcribe::default_model_path, Session, Transcriber};
+use diktate_config::DaemonConfig;
+use diktate_core::segmenter::SegmenterConfig;
+use diktate_core::{transcribe::default_model_path, Session, SessionConfig, Transcriber};
 use diktate_proto::{
     socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
     METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
@@ -19,9 +21,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
-    let model = default_model_path();
+    // Błąd w konfiguracji zatrzymuje start z czytelnym komunikatem — nigdy
+    // nie wracamy po cichu do wartości domyślnych (docs/04).
+    let config = DaemonConfig::load().context("konfiguracja daemona")?;
+
+    let model = model_path(&config);
     eprintln!("diktate-daemon: wczytuję model {}", model.display());
-    let transcriber = Arc::new(Transcriber::new(&model)?);
+    let transcriber = Arc::new(
+        Transcriber::new(&model)?
+            .with_language(config.whisper.language.clone())
+            .with_initial_prompt(config.whisper.initial_prompt.clone())
+            .with_beam_size(config.whisper.beam_size)
+            .with_threads(config.whisper.threads),
+    );
 
     let path = socket_path();
     if path.exists() {
@@ -44,6 +56,35 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Ścieżka modelu: z `daemon.toml`, a gdy puste — `$DIKTATE_MODEL` albo
+/// ścieżka domyślna.
+fn model_path(config: &DaemonConfig) -> std::path::PathBuf {
+    if config.whisper.model.is_empty() {
+        default_model_path()
+    } else {
+        std::path::PathBuf::from(&config.whisper.model)
+    }
+}
+
+/// Parametry sesji z konfiguracji. Czytane przy każdym `session.start`, więc
+/// zmiana progu VAD działa bez restartu daemona — wystarczy zacząć nagrywać
+/// od nowa.
+fn session_config(config: &DaemonConfig) -> SessionConfig {
+    SessionConfig {
+        segmenter: SegmenterConfig {
+            pre_roll_ms: config.audio.pre_roll_ms,
+            hangover_ms: config.vad.hangover_ms,
+            min_speech_ms: config.vad.min_speech_ms,
+            target_speech_ms: config.vad.target_speech_ms,
+            long_silence_ms: config.vad.long_silence_ms,
+            max_segment_ms: config.vad.max_segment_ms,
+        },
+        vad_threshold: config.vad.threshold,
+        queue_capacity: config.queue.max_pending_segments,
+        level_interval_ms: config.audio.level_interval_ms,
+    }
 }
 
 fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
@@ -85,8 +126,21 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                 let backlog_writer = Arc::clone(&writer);
                 let level_writer = Arc::clone(&writer);
                 let level_flag = Arc::clone(&levels_wanted);
+                // Konfiguracja czytana na nowo przy każdym starcie sesji.
+                // Plik niepoprawny nie wywraca działającego daemona —
+                // zostajemy przy tym, co działało, i mówimy o tym głośno.
+                let config = match DaemonConfig::load() {
+                    Ok(config) => config,
+                    Err(err) => {
+                        eprintln!(
+                            "diktate-daemon: konfiguracja niepoprawna, zostaję przy poprzedniej: {err:#}"
+                        );
+                        DaemonConfig::default()
+                    }
+                };
                 match Session::start(
                     Arc::clone(transcriber),
+                    session_config(&config),
                     move |segment| {
                         eprintln!(
                             "diktate-daemon: [{}] {} ({}–{} ms)",

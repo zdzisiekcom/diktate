@@ -20,6 +20,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use diktate_config::DictationConfig;
 use diktate_document::{Anchor, Document, Normalization};
 use diktate_proto::SegmentAdded;
 use gtk4::prelude::*;
@@ -36,11 +37,16 @@ pub struct DocumentView {
     /// wróciłaby przez sygnały edycji i zapisała się w logu drugi raz.
     applying: Cell<bool>,
     normalization: Normalization,
+    config: DictationConfig,
 }
 
 impl DocumentView {
     /// Podpina model pod widok tekstu i podłącza sygnały edycji.
-    pub fn attach(view: &TextView, normalization: Normalization) -> Rc<Self> {
+    pub fn attach(view: &TextView, config: DictationConfig) -> Rc<Self> {
+        let normalization = Normalization {
+            auto_space: config.auto_space,
+            strip_trailing_ellipsis: config.strip_trailing_ellipsis,
+        };
         let buffer = view.buffer();
         // Własne cofanie `GtkTextBuffer` musi zniknąć: historia dokumentu
         // jest jedna i leży w logu operacji.
@@ -53,6 +59,7 @@ impl DocumentView {
             insert_anchor: Cell::new(Anchor::Start),
             applying: Cell::new(false),
             normalization,
+            config,
         });
 
         let for_insert = Rc::clone(&this);
@@ -76,10 +83,17 @@ impl DocumentView {
     /// Wstawia wypowiedź w kotwicę wstawiania i nakłada wynikłą zmianę na
     /// bufor.
     pub fn insert_segment(&self, segment: &SegmentAdded) {
+        // `insert_at_cursor = false` przywraca zachowanie „zawsze na koniec"
+        // — ta sama ścieżka kodu, tylko inna kotwica.
+        let at = if self.config.insert_at_cursor {
+            self.insert_anchor.get()
+        } else {
+            self.document.borrow().end_anchor()
+        };
         let change = self.document.borrow_mut().insert_segment(
             segment.seq,
             &segment.text,
-            self.insert_anchor.get(),
+            at,
             &self.normalization,
         );
         self.insert_anchor.set(change.anchor);
@@ -102,7 +116,7 @@ impl DocumentView {
         self.buffer.place_cursor(&caret);
         self.applying.set(false);
 
-        if follow {
+        if follow && self.config.follow_caret {
             self.view
                 .scroll_to_mark(&self.buffer.get_insert(), 0.0, false, 0.0, 0.0);
         }

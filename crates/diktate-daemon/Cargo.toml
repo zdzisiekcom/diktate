@@ -9,6 +9,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 diktate-proto.workspace = true
+diktate-config.workspace = true
 # Zależność podana wprost ścieżką (zamiast `diktate-core.workspace = true`),
 # żeby `default-features = false` faktycznie zadziałało — cargo ignoruje tę
 # opcję przy dziedziczeniu z workspace.dependencies, jeśli sam wpis w

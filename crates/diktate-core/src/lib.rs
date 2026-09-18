@@ -17,5 +17,5 @@ pub mod vad;
 pub const SAMPLE_RATE: u32 = 16_000;
 
 pub use capture::{Recorder, Recording};
-pub use session::Session;
+pub use session::{Session, SessionConfig};
 pub use transcribe::Transcriber;

@@ -24,9 +24,16 @@ Rozdział nie jest kosmetyczny: agent na maszynie bez serwera wyświetlania nie
 powinien nawet widzieć `gtk.toml`, a klient GUI nie ma powodu modyfikować
 parametrów VAD.
 
-Każdy proces waliduje swój plik przy starcie (błąd walidacji = odmowa startu
-z czytelnym komunikatem, nie ciche wartości domyślne) i przeładowuje go na
-`inotify`. Zmiana progu VAD działa bez restartu daemona.
+Każdy proces waliduje swój plik przy starcie: błąd walidacji to odmowa startu
+z czytelnym komunikatem, nigdy ciche wartości domyślne.
+
+Przeładowanie odbywa się **przy każdym `session.start`**, a nie przez
+`inotify`. Skutek dla użytkownika jest ten sam — zmiana progu VAD działa bez
+restartu daemona, wystarczy zacząć nagrywać od nowa — a nie wymaga
+podglądania katalogu ani wywracania trwającej sesji w połowie wypowiedzi.
+Plik niepoprawny nie zabija działającego daemona: zostaje poprzednia
+konfiguracja i głośne ostrzeżenie. `inotify` zostaje w zanadrzu na wypadek,
+gdyby pojawiły się parametry, których nie da się odłożyć do następnej sesji.
 
 Zapis pliku przez jakiekolwiek narzędzie musi być **atomowy**: zapis do pliku
 tymczasowego w tym samym katalogu, potem `rename`. Inaczej inotify potrafi
@@ -37,91 +44,51 @@ złapać plik w połowie zapisu.
 ```toml
 [audio]
 device = "default"            # nazwa z `diktate-cli devices`
-sample_rate = 16000           # natywny dla whispera, nie zmieniać bez powodu
-channels = 1
-ring_buffer_secs = 30
 pre_roll_ms = 300             # audio sprzed detekcji mowy dołączane do segmentu
+level_interval_ms = 50        # odstęp odczytów poziomu do wskaźnika (~20 Hz)
 
 [vad]
-engine = "silero"             # "silero" | "energy" | "off"
-model_path = ""               # puste = wbudowany silero_vad.onnx
-threshold = 0.5               # 0.0–1.0
-speech_frames_to_start = 3    # ramek 30 ms potwierdzających początek mowy
-silence_ms_to_end = 900       # cisza zamykająca krótką wypowiedź
-long_segment_ms = 5000        # od tej długości wypowiedź uznajemy za długą
-silence_ms_to_end_long = 350  # skrócona cisza zamykająca długą wypowiedź
-min_segment_ms = 300          # krótsze odrzucane jako trzask
-max_segment_ms = 30000        # twarde cięcie (okno whispera to 30 s)
-frame_ms = 30
+threshold = 0.5               # próg decyzyjny Silero, 0.0–1.0
+hangover_ms = 700             # cisza domykająca segment, gdy mowy już dość
+min_speech_ms = 300           # krótsze odrzucane jako trzask
+target_speech_ms = 6000       # ile mowy zebrać, zanim domkniemy hangoverem
+long_silence_ms = 2000        # cisza domykająca zawsze — wyraźna przerwa
+max_segment_ms = 15000        # twarde cięcie (okno whispera to 30 s)
 
 [whisper]
-model = "large-v3-turbo"
-backend = "vulkan"            # "vulkan" | "openvino" | "rocm" | "cpu"
-gpu_device = 0
-fallback_to_cpu = true        # przy niepowodzeniu — zawsze z ostrzeżeniem
-threads = 0                   # 0 = liczba rdzeni fizycznych
+model = ""                    # ścieżka ggml; puste = $DIKTATE_MODEL
+threads = 0                   # 0 = decyzja whispera
 language = "pl"               # kod ISO albo "auto"
-initial_prompt = ""
-temperature = 0.0
-beam_size = 5
-best_of = 5
-suppress_blank = true
-translate = false
-
-[whisper.context]
-enabled = true                # doklejanie ogona wcześniejszego tekstu do promptu
-source = "client"             # "client" = tekst z session.context | "transcript"
-chars = 1200                  # ile znaków kontekstu trafia do promptu
-repetition_guard = true
-repetition_threshold = 0.85   # powyżej → ponowna transkrypcja bez kontekstu
+initial_prompt = ""           # terminologia i nazwy własne
+beam_size = 1                 # 1 = dekodowanie zachłanne
 
 [queue]
 max_pending_segments = 8
-on_overflow = "block"         # "block" | "drop_oldest"
-warn_backlog_at = 3           # od tylu segmentów klient dostaje ostrzeżenie
-
-[filters]
-drop_patterns = [
-  "Napisy stworzone przez.*",
-  "Napisy: .*",
-  "^[\\s.,!?…]*$",
-]
-drop_if_no_speech_prob_above = 0.6
-drop_if_avg_logprob_below = -1.0
-allowed_languages = ["pl", "en"]   # działa tylko przy [whisper].language = "auto";
-                                   # pusta lista = bez ograniczeń
-
-[journal]
-enabled = true
-dir = ""                      # puste = $XDG_STATE_HOME/diktate/journal
-retention_days = 30
-
-[wakeword]
-enabled = false               # stały nasłuch mikrofonu — świadoma decyzja
-model = "tiny"                # model czuwania, osobny od [whisper].model
-language = "pl"
-match_threshold = 0.85        # wyższy niż progi agenta
-normalize_diacritics = true
-confirm_with_main_model = true
-confirm_below_logprob = -0.7
-dictation_phrases = ["dyktuj", "notuj", "zapisz notatkę"]
-agent_keywords = ["zdzisław"]
-unload_main_model_after_idle_secs = 0   # 0 = trzymaj model główny w pamięci
-
-[wakeword.limits]
-max_utterance_ms = 6000       # dłuższe wypowiedzi nie są transkrybowane w czuwaniu
-cooldown_ms = 1500            # blokada po trafieniu
-
-[ipc]
-socket_path = ""              # puste = $XDG_RUNTIME_DIR/diktate.sock
-max_clients = 8
-
-[log]
-level = "info"                # "trace" | "debug" | "info" | "warn" | "error"
-file = ""                     # puste = stderr / journald
 ```
 
-### Profile językowe
+To jest **całość** dzisiejszego `daemon.toml`. Walidacja odrzuca nieznane
+pola, więc sekcje z dalszych etapów — `[whisper.context]`, `[filters]`,
+`[journal]`, `[wakeword]`, `[ipc]`, `[log]` i `[profiles.*]` — nie wpisuje
+się „na zapas": plik z nimi nie przejdzie walidacji. Dochodzą razem z
+etapami, które ich używają. Filtry halucynacji działają dziś na liście
+wkompilowanej w `diktate-core`; przeniesienie ich do `[filters]` to część
+tej samej pracy co journal.
+
+### Dlaczego progi VAD nazywają się właśnie tak
+
+Pierwsza wersja tego dokumentu opisywała progi w kategoriach „krótka
+wypowiedź / długa wypowiedź" i dwóch różnych czasów ciszy. Implementacja
+poszła inną drogą, świadomie: whisper przetwarza zawsze okno **30 sekund**,
+więc koszt jednego segmentu jest stały niezależnie od jego długości —
+dwusekundowy urywek kosztuje tyle samo, co dziesięciosekundowa wypowiedź.
+Dlatego segmenter nie tnie na każdej pauzie, tylko **zbiera materiał** do
+`target_speech_ms` i dopiero wtedy pozwala zwykłej ciszy (`hangover_ms`)
+domknąć segment. Wyraźna przerwa (`long_silence_ms`) domyka zawsze.
+
+Progi powyżej są nazwane tak, jak pokrętła, które faktycznie istnieją
+w `SegmenterConfig` — jedna nazwa, jedno miejsce.
+
+### Profile językowe (etap 3)
 
 Nadpisują wybrane pola `[whisper]` i `[filters]`. Przełączane z tray-a,
 `diktate-cli profile set <nazwa>` albo `session.start { profile }`.
@@ -145,49 +112,30 @@ beam_size = 1
 
 ```toml
 [window]
-always_on_top = true
 width = 620
 height = 420
-position = "center"           # "center" | "cursor" | "remember"
-close_on_copy = true
 show_level_meter = true
-show_confidence = true        # segmenty o niskiej pewności innym kolorem
 
 [dictation]
 insert_at_cursor = true        # segment wchodzi w miejscu karetki, nie na końcu
-implicit_replace = true        # niepuste zaznaczenie uzbraja zastąpienie
-snap_to_word_boundary = true   # zaznaczenie pół słowa rozszerzane do granic
 auto_space = true              # spacja rozdzielająca na stykach
 strip_trailing_ellipsis = true # usuwanie „...” na końcu przerwanej wypowiedzi
-auto_case = "off"              # "off" — korekta wielkości liter na łączeniach
 follow_caret = true            # przewijanie do punktu wstawiania, gdy był widoczny
-
-[replace]
-mode = "one_utterance"        # "one_utterance" | "until_confirm"
-highlight_color = "#f6d32d"
 
 [shortcuts]
 copy = "<Control>c"
-copy_and_close = "<Control>Return"
-redictate = "<Control>r"
 undo = "<Control>z"
 redo = "<Control><Shift>z"
-save = "<Control>s"
-discard = "Escape"
 toggle_recording = "<Control>space"   # wewnątrz okna, nie globalny
-
-[history]
-enabled = true
-dir = ""                      # puste = $XDG_DATA_HOME/diktate/notes
-write_markdown = true
-autosave_on_close = true
 
 [tray]
 enabled = true
-icon_idle = "diktate-symbolic"
-icon_recording = "diktate-recording-symbolic"
 show_backlog = true
 ```
+
+Pola `[replace]`, `[history]`, `implicit_replace`, `snap_to_word_boundary`,
+`auto_case` i `show_confidence` dochodzą razem z etapem 2 — walidacja
+odrzuca nieznane pola, więc nie wpisuje się ich „na zapas".
 
 Skrót globalny (uruchamiający nagrywanie spoza okna) **nie jest tutaj** —
 rejestruje go środowisko graficzne. Patrz [06-gui.md](06-gui.md#skrót-globalny).
