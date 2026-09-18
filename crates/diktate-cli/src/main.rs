@@ -3,6 +3,8 @@
 //! Etap 0 (0a): jedna komenda `record`, która omija daemona i woła rdzeń
 //! bezpośrednio. Służy do sprawdzenia audio i whispera bez GTK i bez IPC.
 
+mod model;
+
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use diktate_core::{transcribe::default_model_path, Recorder, Transcriber};

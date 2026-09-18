@@ -113,13 +113,16 @@ impl Transcriber {
     }
 }
 
-/// Ścieżka modelu, gdy `daemon.toml` jej nie podaje: `$DIKTATE_MODEL`, a w
-/// ostateczności `~/models/whisper/ggml-small.bin`.
+/// Domyślna ścieżka modelu: `$DIKTATE_MODEL`, a bez niej
+/// `~/.diktate/models/ggml-small-q5_1.bin` — katalog, do którego pobiera
+/// `diktate setup` (`docs/04-konfiguracja.md#kreator-diktate-setup`).
+/// Pole `whisper.model` z `daemon.toml` rozstrzyga wcześniej i nie
+/// przechodzi tędy.
 pub fn default_model_path() -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("DIKTATE_MODEL") {
         return std::path::PathBuf::from(path);
     }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     home.unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("models/whisper/ggml-small.bin")
+        .join(".diktate/models/ggml-small-q5_1.bin")
 }
