@@ -15,6 +15,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod pidfile;
+
 /// Ścieżka gniazda: `$XDG_RUNTIME_DIR/diktate.sock`, z odwrotem na `/tmp`.
 pub fn socket_path() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {

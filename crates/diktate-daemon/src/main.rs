@@ -8,14 +8,13 @@
 //! (odpowiedzi), i wątek transkrypcji sesji (powiadomienia) piszą do niego
 //! pod tym samym zamkiem, żeby żadna linia NDJSON się nie przeplotła.
 mod cli;
-mod pidfile;
 
 use anyhow::{anyhow, bail, Context, Result};
 use diktate_config::DaemonConfig;
 use diktate_core::segmenter::SegmenterConfig;
 use diktate_core::{transcribe::default_model_path, Session, SessionConfig, Transcriber};
 use diktate_proto::{
-    socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
+    pidfile, socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
     METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
 };
 use std::io::{BufRead, BufReader, Write};
