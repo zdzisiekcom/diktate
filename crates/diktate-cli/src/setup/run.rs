@@ -71,26 +71,56 @@ pub fn run(advanced: bool) -> Result<()> {
     }
 
     // --- rytm ---
-    let options: Vec<String> = profile::RHYTHMS
+    // Progi spoza trzech profili to „profil własny" (docs/04) — kreatorowi
+    // nie wolno podmienić go po cichu, więc dokładamy do listy dodatkową
+    // pozycję, która zostawia progi bez zmian, i robimy z niej domyślną
+    // odpowiedź pod Enterem.
+    let mut options: Vec<String> = profile::RHYTHMS
         .iter()
         .map(|r| format!("{:<14} {} ms — {}", r.name, r.long_segment_ms, r.opis))
         .collect();
-    let current = profile::current(&daemon)
-        .and_then(|r| profile::RHYTHMS.iter().position(|x| x.name == r.name))
-        .unwrap_or(1);
-    let choice = dialog::ask_choice("Rytm segmentacji?", &options, current)?;
-    let rhythm = &profile::RHYTHMS[choice];
-    if profile::too_fast_for(rhythm, model.run_ms) {
-        println!(
-            "\nUwaga: przy modelu {} segment w tym rytmie kosztuje więcej, niż trwa.",
-            model.name
-        );
-        println!("Kolejka będzie rosła, a tekst pojawiał się coraz później, nie wcześniej.");
-        if !dialog::ask_bool("Mimo to ustawić ten rytm?", false)? {
-            return run(advanced);
+    let own_index = if profile::current(&daemon).is_none() {
+        options.push(format!(
+            "własny          — zostaw progi, które już masz (long_segment_ms = {}, \
+             silence_ms_to_end = {}, silence_ms_to_end_long = {})",
+            daemon.vad.long_segment_ms,
+            daemon.vad.silence_ms_to_end,
+            daemon.vad.silence_ms_to_end_long,
+        ));
+        Some(options.len() - 1)
+    } else {
+        None
+    };
+    let default_rhythm = match profile::current(&daemon) {
+        Some(r) => profile::RHYTHMS
+            .iter()
+            .position(|x| x.name == r.name)
+            .unwrap_or(1),
+        None => own_index.expect("own_index ustawiony, gdy current() zwraca None"),
+    };
+    // Odmowa ostrzeżenia o zbyt szybkim rytmie wraca tylko do tego pytania —
+    // nie do całego kreatora, żeby nie gubić odpowiedzi z bieżącej sesji.
+    let chosen_rhythm = loop {
+        let choice = dialog::ask_choice("Rytm segmentacji?", &options, default_rhythm)?;
+        if Some(choice) == own_index {
+            break None;
         }
+        let rhythm = &profile::RHYTHMS[choice];
+        if profile::too_fast_for(rhythm, model.run_ms) {
+            println!(
+                "\nUwaga: przy modelu {} segment w tym rytmie kosztuje więcej, niż trwa.",
+                model.name
+            );
+            println!("Kolejka będzie rosła, a tekst pojawiał się coraz później, nie wcześniej.");
+            if !dialog::ask_bool("Mimo to ustawić ten rytm?", false)? {
+                continue;
+            }
+        }
+        break Some(rhythm);
+    };
+    if let Some(rhythm) = chosen_rhythm {
+        profile::apply(&mut daemon.vad, rhythm);
     }
-    profile::apply(&mut daemon.vad, rhythm);
 
     // --- GTK ---
     gtk.tray.enabled = dialog::ask_bool("Ikona w zasobniku systemowym?", gtk.tray.enabled)?;
@@ -101,6 +131,23 @@ pub fn run(advanced: bool) -> Result<()> {
 
     if advanced {
         ask_rest(&mut daemon, &mut gtk)?;
+    }
+
+    // --- walidacja wyniku ---
+    // Kreator nie potrafi zapisać pliku, który zablokowałby start daemona
+    // albo klienta (docs/04, „Zapis"). `from_toml` woła walidację `diktate-config`
+    // wewnątrz, więc nie utrzymujemy tu drugiej, własnej listy reguł.
+    let daemon_text = write::daemon_toml(&daemon);
+    let gtk_text = write::gtk_toml(&gtk);
+    if let Err(e) = DaemonConfig::from_toml(&daemon_text) {
+        println!("\nTa konfiguracja nie wystartuje: {e}");
+        println!("Nic nie zapisano.");
+        return Ok(());
+    }
+    if let Err(e) = GtkConfig::from_toml(&gtk_text) {
+        println!("\nTa konfiguracja nie wystartuje: {e}");
+        println!("Nic nie zapisano.");
+        return Ok(());
     }
 
     // --- podgląd i zapis ---
@@ -121,8 +168,8 @@ pub fn run(advanced: bool) -> Result<()> {
 
     let daemon_path = DaemonConfig::path();
     let gtk_path = GtkConfig::path();
-    write::save(&daemon_path, &write::daemon_toml(&daemon))?;
-    write::save(&gtk_path, &write::gtk_toml(&gtk))?;
+    write::save(&daemon_path, &daemon_text)?;
+    write::save(&gtk_path, &gtk_text)?;
 
     println!("\nZapisano:");
     println!("  {}", daemon_path.display());
@@ -150,6 +197,10 @@ fn input_devices() -> Vec<String> {
 /// w nawiasie.
 fn ask_rest(daemon: &mut DaemonConfig, gtk: &mut GtkConfig) -> Result<()> {
     println!("\n--- Pozostałe pola daemon.toml ---");
+    daemon.vad.threshold = dialog::ask_f32(
+        "vad.threshold — próg decyzyjny Silero, 0.0–1.0",
+        daemon.vad.threshold,
+    )?;
     daemon.audio.pre_roll_ms = dialog::ask_u32(
         "audio.pre_roll_ms — ile ciszy sprzed mowy dokleić",
         daemon.audio.pre_roll_ms,

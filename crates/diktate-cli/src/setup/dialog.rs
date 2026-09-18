@@ -5,16 +5,28 @@
 
 use std::io::{BufRead, Write};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
+/// Zero odczytanych bajtów znaczy `EOF` — wejście się skończyło, nie że
+/// padł pusty Enter (ten niesie sam znak nowej linii, więc `read_line`
+/// zwraca co najmniej 1). Kreator na wstępie obiecuje „nic nie zapisujemy
+/// bez pytania" — cichy Enter przy zamkniętym terminalu złamałby tę obietnicę
+/// równie mocno, co zapisanie czegokolwiek bez udziału człowieka.
 fn read_line() -> Result<String> {
     print!("> ");
     std::io::stdout().flush()?;
     let mut line = String::new();
-    std::io::stdin()
+    let read = std::io::stdin()
         .lock()
         .read_line(&mut line)
         .context("nie udało się odczytać odpowiedzi")?;
+    if read == 0 {
+        bail!(
+            "kreator wymaga terminala — standardowe wejście się skończyło; \
+             do użycia bez dialogu są `diktate model pull` i ręczna edycja \
+             plików w ~/.config/diktate"
+        );
+    }
     Ok(line)
 }
 
@@ -34,6 +46,18 @@ pub fn parse_bool(answer: &str, default: bool) -> Option<bool> {
         "n" | "nie" | "no" => Some(false),
         _ => None,
     }
+}
+
+pub fn parse_f32(answer: &str, default: f32) -> Option<f32> {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return Some(default);
+    }
+    // Rust przyjmuje tylko kropkę jako separator dziesiętny — przecinek
+    // (naturalny na polskiej klawiaturze) trafia więc, jak każdy inny
+    // nieliczbowy tekst, do gałęzi „spróbuj jeszcze raz", a nie do cichej
+    // naprawy w locie.
+    trimmed.parse().ok()
 }
 
 pub fn parse_choice(answer: &str, count: usize, default: usize) -> Option<usize> {
@@ -60,6 +84,16 @@ pub fn ask_u32(question: &str, default: u32) -> Result<u32> {
         match answer.parse() {
             Ok(value) => return Ok(value),
             Err(_) => println!("To nie jest liczba. Spróbuj jeszcze raz."),
+        }
+    }
+}
+
+pub fn ask_f32(question: &str, default: f32) -> Result<f32> {
+    loop {
+        let answer = ask_text(question, &default.to_string())?;
+        match parse_f32(&answer, default) {
+            Some(value) => return Ok(value),
+            None => println!("To nie jest liczba. Spróbuj jeszcze raz."),
         }
     }
 }
@@ -109,6 +143,14 @@ mod tests {
         assert_eq!(parse_bool("n", true), Some(false));
         assert_eq!(parse_bool("nie", true), Some(false));
         assert_eq!(parse_bool("może", true), None);
+    }
+
+    #[test]
+    fn przecinek_i_tekst_to_niepoprawna_liczba() {
+        assert_eq!(parse_f32("", 0.5), Some(0.5));
+        assert_eq!(parse_f32("0,5", 0.5), None);
+        assert_eq!(parse_f32("tekst", 0.5), None);
+        assert_eq!(parse_f32("0.75", 0.5), Some(0.75));
     }
 
     #[test]
