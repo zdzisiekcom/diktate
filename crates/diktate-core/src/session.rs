@@ -31,6 +31,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
+use std::time::Instant;
 use std::thread::JoinHandle;
 
 use anyhow::{anyhow, Context, Result};
@@ -62,7 +63,7 @@ impl Default for SessionConfig {
         Self {
             segmenter: SegmenterConfig::default(),
             vad_threshold: 0.5,
-            queue_capacity: 8,
+            queue_capacity: 16,
             level_interval_ms: DEFAULT_INTERVAL_MS,
         }
     }
@@ -199,7 +200,7 @@ impl Session {
         let capture = Recorder::start_streaming(chunk_tx)
             .context("nie udało się uruchomić przechwytywania strumieniowego")?;
 
-        let (segment_tx, segment_rx) = mpsc::sync_channel::<(u64, Segment)>(config.queue_capacity);
+        let (segment_tx, segment_rx) = mpsc::sync_channel::<(u64, Segment, Instant)>(config.queue_capacity);
         let backlog = Arc::new(Backlog::new(on_backlog));
 
         let segmenter_backlog = Arc::clone(&backlog);
@@ -261,7 +262,7 @@ impl Session {
 /// po `capture.stop()`), po czym domyka ewentualny trwający segment.
 fn run_segmenter<G: Fn(u32), L: Fn(Level)>(
     chunk_rx: Receiver<Vec<f32>>,
-    segment_tx: SyncSender<(u64, Segment)>,
+    segment_tx: SyncSender<(u64, Segment, Instant)>,
     mut vad: Vad,
     mut segmenter: Segmenter,
     backlog: &Backlog<G>,
@@ -301,12 +302,12 @@ fn run_segmenter<G: Fn(u32), L: Fn(Level)>(
 /// ([`Backlog`]) rośnie tylko wtedy, gdy segment faktycznie trafił do
 /// kolejki — porzucony segment nigdy w niej nie był, więc jej nie zwiększa.
 fn dispatch_segment<G: Fn(u32)>(
-    segment_tx: &SyncSender<(u64, Segment)>,
+    segment_tx: &SyncSender<(u64, Segment, Instant)>,
     seq: u64,
     segment: Segment,
     backlog: &Backlog<G>,
 ) {
-    match segment_tx.try_send((seq, segment)) {
+    match segment_tx.try_send((seq, segment, Instant::now())) {
         Ok(()) => backlog.inc(),
         Err(mpsc::TrySendError::Full(_)) => {
             eprintln!(
@@ -335,15 +336,27 @@ fn dispatch_segment<G: Fn(u32)>(
 /// `on_backlog(0)` zostaje wywołane, nawet jeśli sesja nie miała ani jednego
 /// segmentu.
 fn run_transcriber<F, G: Fn(u32)>(
-    segment_rx: Receiver<(u64, Segment)>,
+    segment_rx: Receiver<(u64, Segment, Instant)>,
     transcriber: &Transcriber,
     on_segment: F,
     backlog: &Backlog<G>,
 ) where
     F: Fn(TranscribedSegment),
 {
-    while let Ok((seq, segment)) = segment_rx.recv() {
-        match transcriber.transcribe(&segment.audio) {
+    while let Ok((seq, segment, queued_at)) = segment_rx.recv() {
+        let waited = queued_at.elapsed();
+        let started = Instant::now();
+        let result = transcriber.transcribe(&segment.audio);
+        // Diagnostyka rytmu: gdzie naprawdę schodzi czas między końcem
+        // wypowiedzi a tekstem na ekranie. Oczekiwanie w kolejce rosnące
+        // z segmentu na segment znaczy, że transkrypcja nie nadąża za mową
+        // i progi w `[vad]` są dobrane pod za wolny backend.
+        eprintln!(
+            "sesja: segment {seq} — w kolejce {} ms, transkrypcja {} ms",
+            waited.as_millis(),
+            started.elapsed().as_millis()
+        );
+        match result {
             Ok(text) => match filters::clean(&text) {
                 Some(cleaned) => on_segment(TranscribedSegment {
                     seq,
@@ -441,13 +454,14 @@ mod tests {
 
     #[test]
     fn dispatch_segment_porzuca_gdy_kolejka_pelna_nie_blokujac() {
-        let (tx, rx) = mpsc::sync_channel::<(u64, Segment)>(1);
+        let (tx, rx) = mpsc::sync_channel::<(u64, Segment, Instant)>(1);
         let backlog = Backlog::new(|_| {});
         dispatch_segment(&tx, 0, segment(1.0), &backlog);
         // Kolejka ma pojemność 1 i jest teraz pełna — drugie wysłanie musi
         // się nie zablokować, tylko porzucić segment.
         dispatch_segment(&tx, 1, segment(2.0), &backlog);
-        assert_eq!(rx.try_recv().unwrap(), (0, segment(1.0)));
+        let (seq, received, _queued_at) = rx.try_recv().unwrap();
+        assert_eq!((seq, received), (0, segment(1.0)));
         assert!(rx.try_recv().is_err());
     }
 
@@ -464,7 +478,7 @@ mod tests {
 
     #[test]
     fn backlog_rosnie_przy_udanym_wyslaniu_segmentu() {
-        let (tx, _rx) = mpsc::sync_channel::<(u64, Segment)>(8);
+        let (tx, _rx) = mpsc::sync_channel::<(u64, Segment, Instant)>(8);
         let (backlog, history) = backlog_z_historia();
 
         dispatch_segment(&tx, 0, segment(1.0), &backlog);
@@ -476,7 +490,7 @@ mod tests {
 
     #[test]
     fn backlog_nie_rosnie_gdy_segment_porzucony_z_pelnej_kolejki() {
-        let (tx, _rx) = mpsc::sync_channel::<(u64, Segment)>(1);
+        let (tx, _rx) = mpsc::sync_channel::<(u64, Segment, Instant)>(1);
         let (backlog, history) = backlog_z_historia();
 
         dispatch_segment(&tx, 0, segment(1.0), &backlog); // trafia do kolejki, licznik = 1

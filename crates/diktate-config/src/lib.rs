@@ -76,16 +76,15 @@ impl Default for AudioConfig {
 pub struct VadConfig {
     /// Próg decyzyjny Silero (0.0–1.0).
     pub threshold: f32,
-    /// Cisza domykająca segment, gdy zebrano już `target_speech_ms` mowy.
-    pub hangover_ms: u32,
+    /// Cisza domykająca wypowiedź krótszą niż `long_segment_ms`.
+    pub silence_ms_to_end: u32,
+    /// Cisza domykająca wypowiedź dłuższą niż `long_segment_ms` — krótka,
+    /// żeby tekst płynął na ekran w trakcie mówienia.
+    pub silence_ms_to_end_long: u32,
+    /// Po jakiej długości wypowiedzi przełączyć się na krótszy próg ciszy.
+    pub long_segment_ms: u32,
     /// Krótsze wypowiedzi odrzucamy jako stuknięcie albo szum.
     pub min_speech_ms: u32,
-    /// Ile mowy warto zebrać, zanim domkniemy segment zwykłym hangoverem.
-    /// Koszt okna whispera jest stały niezależnie od długości wycinka, więc
-    /// krótkie pauzy nie dzielą wypowiedzi, dopóki ta stawka się nie opłaci.
-    pub target_speech_ms: u32,
-    /// Cisza domykająca segment zawsze — to już wyraźna przerwa.
-    pub long_silence_ms: u32,
     /// Twardy limit długości segmentu.
     pub max_segment_ms: u32,
 }
@@ -94,10 +93,10 @@ impl Default for VadConfig {
     fn default() -> Self {
         Self {
             threshold: 0.5,
-            hangover_ms: 700,
+            silence_ms_to_end: 1_500,
+            silence_ms_to_end_long: 200,
+            long_segment_ms: 2_500,
             min_speech_ms: 300,
-            target_speech_ms: 6_000,
-            long_silence_ms: 2_000,
             max_segment_ms: 15_000,
         }
     }
@@ -142,7 +141,7 @@ pub struct QueueConfig {
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            max_pending_segments: 8,
+            max_pending_segments: 16,
         }
     }
 }
@@ -184,6 +183,22 @@ impl DaemonConfig {
             bail!(
                 "vad.max_segment_ms ({}) przekracza okno whispera ({WHISPER_WINDOW_MS} ms) — \
                  dłuższy segment i tak zostałby obcięty, tyle że po cichu",
+                self.vad.max_segment_ms
+            );
+        }
+        if self.vad.silence_ms_to_end_long > self.vad.silence_ms_to_end {
+            bail!(
+                "vad.silence_ms_to_end_long ({}) musi być krótsze niż vad.silence_ms_to_end ({}) \
+                 — adaptacyjny próg ma rytm skracać, nie wydłużać",
+                self.vad.silence_ms_to_end_long,
+                self.vad.silence_ms_to_end
+            );
+        }
+        if self.vad.long_segment_ms >= self.vad.max_segment_ms {
+            bail!(
+                "vad.long_segment_ms ({}) musi być mniejsze od vad.max_segment_ms ({}) — \
+                 inaczej krótszy próg ciszy nigdy by się nie włączył",
+                self.vad.long_segment_ms,
                 self.vad.max_segment_ms
             );
         }

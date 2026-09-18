@@ -45,13 +45,19 @@ cargo clippy --workspace --all-targets
 ```
 
 Model whisper: `~/models/whisper/ggml-small.bin`, ścieżkę nadpisuje
-`DIKTATE_MODEL`. Diagnostyka segmentacji bez mikrofonu:
+`DIKTATE_MODEL`. Diagnostyka bez mikrofonu:
 
 ```bash
-cargo run -p diktate-core --example segment-wav -- testdata/jfk.wav
+cargo run -p diktate-core --example segment-wav -- testdata/jfk.wav   # gdzie tnie segmenter
+cargo run -p diktate-core --example bench-model -- probka.wav 4       # koszt modelu, wczytany raz
 ./target/debug/diktate-cli record --wav testdata/jfk.wav --language en
 python3 scripts/smoke-ipc.py         # test dymny protokołu, wymaga daemona
 ```
+
+Daemon jest jeden na sesję (plik `$XDG_RUNTIME_DIR/diktate.pid`). Po zmianie
+`daemon.toml` albo przebudowaniu binarki: `diktate-daemon --restart`. Zwykły
+start przy działającym daemonie odmawia — bez tego starszy proces zostawał
+w pamięci i zmiany wyglądały, jakby nie działały.
 
 ## Pułapki tego środowiska
 
@@ -71,13 +77,53 @@ bez sprawdzenia, że problem zniknął:
   `build.rs`, a system nie ma nagłówków OpenSSL. Unifikacja cech w resolverze
   v2 jest osobna dla build-dependencies, więc wpis musi być właśnie tam.
 
-## Wydajność transkrypcji — liczba, o której łatwo zapomnieć
+## Wydajność transkrypcji — liczby, o których łatwo zapomnieć
 
-Whisper przetwarza zawsze okno **30 sekund**, więc koszt jednego segmentu jest
-stały niezależnie od jego długości: dwusekundowy urywek kosztuje tyle samo, co
-dziesięciosekundowa wypowiedź. Stąd segmenter zbiera materiał (`target_speech_ms`)
-zamiast ciąć na każdej pauzie. Każdy pomysł „tnijmy drobniej, będzie płynniej"
-trzeba konfrontować z tą liczbą.
+Whisper przetwarza zawsze okno **30 sekund**, więc koszt segmentu jest
+zdominowany przez enkoder i prawie nie zależy od tego, ile w segmencie mowy.
+„Prawie" — bo dekoder skaluje się z liczbą tokenów. Zmierzone dla
+`small-q5_1` na Vulkanie: 2 s materiału → 2,6 s, 3 s → 2,8 s, 5 s → 3,0 s.
+Wniosek jest mocniejszy, niż gdyby koszt był idealnie stały: **krótkie
+segmenty się nie opłacają**, bo dwusekundowy wycinek kosztuje prawie tyle,
+co pięciosekundowy.
+
+Segmenter mimo to tnie płynnie, adaptacyjnym progiem ciszy (`docs/07`):
+rozpędzona wypowiedź domyka się już po 200 ms pauzy, żeby tekst pojawiał się
+w trakcie mówienia, a nie blokiem na końcu. O tempie decyduje przy tym
+`long_segment_ms`, nie długość pauzy — po każdym cięciu segment rośnie od
+zera, więc dopiero ten próg wyznacza, jak często tekst wychodzi.
+
+### Modele na tym sprzęcie (Intel Meteor Lake, Vulkan)
+
+Mierzone na 20 s polskiej mowy, model wczytany raz
+(`cargo run -p diktate-core --example bench-model -- plik.wav 4`):
+
+| model | rozmiar | wczytanie | przebieg | jakość polszczyzny |
+|-------|---------|-----------|----------|--------------------|
+| `base` | 141 MB | 0,5 s | ~2,1 s | słaba — myli słowa |
+| `small-q5_1` | 181 MB | 0,6 s | ~4,5 s | dobra; **domyślny wybór** |
+| `small` | 465 MB | — | ~4,9 s | jak wyżej, wolniej i 2,5× większy |
+| `large-v3-turbo-q5_0` | 547 MB | 1,2 s | 14 → 20 s | najlepsza, ale nie do użycia |
+
+Turbo przy ciągłej pracy **zwalnia** (14,0 → 16,4 → 19,3 → 20,0 s), dobijając
+do czasu rzeczywistego — iGPU najpewniej ogranicza zegar pod obciążeniem. Im
+dłużej ktoś mówi, tym bardziej transkrypcja zostaje w tyle, więc duży model
+odpada tu mimo najlepszej jakości. Na mocniejszym GPU rachunek może wyjść
+inaczej — wtedy trzeba go powtórzyć, a nie przyjąć te liczby na wiarę.
+
+Kwantyzacja na Vulkanie **nie** spowalnia: `small-q5_1` jest szybsze od
+`small`, a `base-q5_1` od `base`. Wersje `q5` są więc wyborem domyślnym.
+
+### Dobieranie `long_segment_ms`
+
+Segment musi kosztować mniej, niż trwa, inaczej kolejka rośnie i tekst
+pojawia się **później**, nie wcześniej. Dla `small-q5_1` (~2,8 s na segment)
+próg 2500 ms daje segmenty ~3,4 s, czyli ~85% przepustowości — to granica.
+Niżej schodzi się tylko razem ze zmianą na szybszy model.
+
+Każdy pomysł na zmianę rytmu segmentacji trzeba skonfrontować z obiema
+liczbami naraz: kosztem przebiegu dla wybranego modelu i długością segmentu,
+jaką dany próg faktycznie daje (`--example segment-wav` to pokazuje).
 
 ## Testy
 

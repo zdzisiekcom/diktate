@@ -52,7 +52,27 @@ fn segment_dluzszy_niz_okno_whispera_jest_odrzucany() {
 fn wczytana_wartosc_nadpisuje_domyslna_a_reszta_zostaje() {
     let config = DaemonConfig::from_toml("[vad]\nthreshold = 0.7\n").unwrap();
     assert_eq!(config.vad.threshold, 0.7);
-    assert_eq!(config.vad.hangover_ms, 700, "reszta sekcji bez zmian");
+    assert_eq!(config.vad.silence_ms_to_end, 1_500, "reszta sekcji bez zmian");
+}
+
+#[test]
+fn krotszy_prog_ciszy_dluzszy_od_zwyklego_jest_odrzucany() {
+    // Adaptacyjny próg ma rytm skracać, nie wydłużać (docs/07). Odwrotne
+    // ustawienie znaczy, że długa wypowiedź czekałaby na tekst dłużej niż
+    // krótka — to zawsze pomyłka w pliku, nie zamiar.
+    let err =
+        DaemonConfig::from_toml("[vad]\nsilence_ms_to_end = 300\nsilence_ms_to_end_long = 1500\n")
+            .expect_err("krótszy próg dłuższy od zwykłego nie ma sensu");
+    assert!(format!("{err:#}").contains("silence_ms_to_end_long"));
+}
+
+#[test]
+fn prog_dlugiej_wypowiedzi_powyzej_twardego_limitu_jest_odrzucany() {
+    // Gdyby long_segment_ms przekraczał max_segment_ms, krótki próg nigdy
+    // by się nie włączył — adaptacja byłaby martwym kodem.
+    let err = DaemonConfig::from_toml("[vad]\nlong_segment_ms = 20000\nmax_segment_ms = 15000\n")
+        .expect_err("próg długości powyżej twardego limitu nigdy by nie zadziałał");
+    assert!(format!("{err:#}").contains("long_segment_ms"));
 }
 
 #[test]

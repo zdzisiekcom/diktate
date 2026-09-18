@@ -75,10 +75,10 @@ fn session_config(config: &DaemonConfig) -> SessionConfig {
     SessionConfig {
         segmenter: SegmenterConfig {
             pre_roll_ms: config.audio.pre_roll_ms,
-            hangover_ms: config.vad.hangover_ms,
+            silence_ms_to_end: config.vad.silence_ms_to_end,
+            silence_ms_to_end_long: config.vad.silence_ms_to_end_long,
+            long_segment_ms: config.vad.long_segment_ms,
             min_speech_ms: config.vad.min_speech_ms,
-            target_speech_ms: config.vad.target_speech_ms,
-            long_silence_ms: config.vad.long_silence_ms,
             max_segment_ms: config.vad.max_segment_ms,
         },
         vad_threshold: config.vad.threshold,

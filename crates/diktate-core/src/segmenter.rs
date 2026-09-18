@@ -5,58 +5,56 @@
 //! początku mowy, żeby nie ucinać pierwszej głoski. Gdy VAD zgłosi mowę,
 //! bufor kroczący staje się początkiem trwającego segmentu (`Active`).
 //!
-//! Whisper zawsze przetwarza całe okno 30 s, więc koszt transkrypcji
-//! jednego segmentu jest w praktyce stały bez względu na to, ile w nim
-//! samej mowy — wycinek 3-sekundowy kosztuje tyle samo, co 11-sekundowy
-//! (zmierzone: 4,2 s dla modelu base, 15,0 s dla small). Domykanie
-//! segmentu przy pierwszej krótkiej pauzie marnowałoby więc tę stałą
-//! stawkę na strzępki mowy, dlatego segment domyka się dopiero, gdy
-//! spełniony jest jeden z trzech warunków:
-//! - cisza trwa co najmniej `hangover_ms` ORAZ zebrano już co najmniej
-//!   `target_speech_ms` mowy — materiału jest tyle, że dalsze czekanie
-//!   nic nie daje;
-//! - cisza trwa co najmniej `long_silence_ms`, niezależnie od tego, ile
-//!   mowy zebrano — to wyraźna przerwa, nie ma na co czekać;
-//! - długość bufora przekroczy `max_segment_ms` — twardy limit, cięcie
-//!   mimo trwającej mowy.
+//! Segment domyka cisza — ale próg tej ciszy **zależy od tego, jak długo
+//! trwa już bieżąca wypowiedź** (`docs/07-zachowanie-dyktowania.md`,
+//! „Rytm: adaptacyjny próg ciszy"). Jeden stały próg nie obsługuje obu
+//! sytuacji naraz: krótki tnie zdanie na pauzie przed trudnym słowem,
+//! długi każe czekać po każdej wypowiedzi i nie kończy monologu, dopóki
+//! mówiący nie zrobi wyraźnej przerwy. Stąd:
 //!
-//! W czasie krótkiej pauzy (między `hangover_ms` a `long_silence_ms`), gdy
-//! materiału jest jeszcze za mało, segment zostaje otwarty i zbiera dalej
-//! — cisza pomiędzy kolejnymi wypowiedziami trafia do bufora razem z nimi.
+//! ```text
+//! długość segmentu <= long_segment_ms  →  cisza kończąca = silence_ms_to_end
+//! długość segmentu >  long_segment_ms  →  cisza kończąca = silence_ms_to_end_long
+//! ```
+//!
+//! Na początku wypowiedzi użytkownik ma czas na zastanowienie. Gdy mówi już
+//! dłuższą chwilę, każda pauza kończy segment niemal natychmiast — tekst
+//! zaczyna płynąć na ekran w trakcie mówienia, zamiast spaść blokiem na
+//! końcu. Za „długość segmentu" bierzemy rozmiar bufora, a więc czas od
+//! początku wypowiedzi wraz z ciszą w środku, nie samą ilość mowy.
+//!
+//! `max_segment_ms` pozostaje twardym cięciem — po nim tniemy mimo
+//! trwającej mowy, bo okno whispera to 30 s.
 //!
 //! Segment, w którym samej mowy było mniej niż `min_speech_ms`, jest
 //! odrzucany — to filtr na stuknięcia i szum, nie na właściwą wypowiedź.
-//! `flush()` domyka trwający segment od razu, bez czekania na
-//! `target_speech_ms` (koniec sesji — nie ma po co dalej zbierać), ale
-//! nadal odrzuca go, jeśli mowy było mniej niż `min_speech_ms`.
+//! `flush()` domyka trwający segment od razu (koniec sesji — nie ma po co
+//! dalej zbierać), ale nadal odrzuca go, jeśli mowy było za mało.
 
 use std::collections::VecDeque;
 
 use crate::SAMPLE_RATE;
 
-/// Parametry składania ramek w segmenty. Wartości domyślne dobrane pod
-/// dyktowanie mową ciągłą przy ramkach 512 próbek / 16 kHz (32 ms).
+/// Parametry składania ramek w segmenty. Wartości domyślne pochodzą
+/// z prototypu, w którym rytm dyktowania sprawdził się w praktyce
+/// (`docs/07`), i zakładają ramki 512 próbek / 16 kHz (32 ms).
 #[derive(Debug, Clone, Copy)]
 pub struct SegmenterConfig {
     /// Ile ciszy przed początkiem mowy dołączyć do segmentu.
     pub pre_roll_ms: u32,
-    /// Ile ciągłej ciszy — przy zebranym już `target_speech_ms` mowy —
-    /// kończy segment.
-    pub hangover_ms: u32,
+    /// Cisza domykająca segment, dopóki wypowiedź jest krótsza niż
+    /// `long_segment_ms` — na tyle długa, żeby wybaczyć zawahanie przed
+    /// trudnym słowem.
+    pub silence_ms_to_end: u32,
+    /// Cisza domykająca segment, gdy wypowiedź trwa już dłużej niż
+    /// `long_segment_ms`. Krótka, bo mówiący jest w rytmie i każda pauza
+    /// między zdaniami ma od razu wypchnąć tekst na ekran.
+    pub silence_ms_to_end_long: u32,
+    /// Po jakiej długości wypowiedzi przełączyć się na krótszy próg ciszy.
+    pub long_segment_ms: u32,
     /// Minimalna ilość samej mowy w segmencie; krócej — odrzucamy jako
     /// stuknięcie lub szum.
     pub min_speech_ms: u32,
-    /// Ile mowy warto zebrać, zanim domkniemy segment na zwykłym
-    /// `hangover_ms`. Koszt transkrypcji okna whispera jest stały bez
-    /// względu na długość wycinka, więc krótsze pauzy (poniżej
-    /// `long_silence_ms`) nie domykają segmentu, dopóki nie uzbieramy
-    /// tyle mowy, żeby ta stała stawka się opłacała — segment zbiera
-    /// dalej, wliczając ciszę pomiędzy wypowiedziami.
-    pub target_speech_ms: u32,
-    /// Cisza tej długości domyka segment zawsze, niezależnie od tego, ile
-    /// mowy zebrano — to już wyraźna przerwa użytkownika, nie ma na co
-    /// czekać.
-    pub long_silence_ms: u32,
     /// Twardy limit długości segmentu — po nim tniemy mimo trwającej mowy.
     pub max_segment_ms: u32,
 }
@@ -65,10 +63,10 @@ impl Default for SegmenterConfig {
     fn default() -> Self {
         Self {
             pre_roll_ms: 300,
-            hangover_ms: 700,
+            silence_ms_to_end: 1_500,
+            silence_ms_to_end_long: 200,
+            long_segment_ms: 2_500,
             min_speech_ms: 300,
-            target_speech_ms: 6_000,
-            long_silence_ms: 2_000,
             max_segment_ms: 15_000,
         }
     }
@@ -128,10 +126,10 @@ impl Segment {
 /// Składa strumień ramek (z decyzją VAD dla każdej) w segmenty wypowiedzi.
 pub struct Segmenter {
     pre_roll_samples: usize,
-    hangover_samples: usize,
+    silence_to_end_samples: usize,
+    silence_to_end_long_samples: usize,
+    long_segment_samples: usize,
     min_speech_samples: usize,
-    target_speech_samples: usize,
-    long_silence_samples: usize,
     max_segment_samples: usize,
     state: State,
     /// Liczba próbek przyjętych od początku sesji — oś czasu, w której
@@ -143,10 +141,10 @@ impl Segmenter {
     pub fn new(config: SegmenterConfig) -> Self {
         Self {
             pre_roll_samples: ms_to_samples(config.pre_roll_ms),
-            hangover_samples: ms_to_samples(config.hangover_ms),
+            silence_to_end_samples: ms_to_samples(config.silence_ms_to_end),
+            silence_to_end_long_samples: ms_to_samples(config.silence_ms_to_end_long),
+            long_segment_samples: ms_to_samples(config.long_segment_ms),
             min_speech_samples: ms_to_samples(config.min_speech_ms),
-            target_speech_samples: ms_to_samples(config.target_speech_ms),
-            long_silence_samples: ms_to_samples(config.long_silence_ms),
             max_segment_samples: ms_to_samples(config.max_segment_ms),
             state: State::Idle {
                 preroll: VecDeque::new(),
@@ -257,16 +255,9 @@ impl Segmenter {
                 State::Idle { preroll }
             };
             (new_state, result)
-        } else if silence_run >= self.long_silence_samples
-            || (silence_run >= self.hangover_samples
-                && speech_samples >= self.target_speech_samples)
-        {
-            // Domykamy albo bo cisza jest już na tyle długa, że to wyraźna
-            // przerwa (niezależnie od zebranej mowy), albo bo zwykły
-            // hangover wystarczy — mamy już `target_speech_ms` mowy, więc
-            // stała stawka transkrypcji się opłaca. W przeciwnym razie
-            // (krótka pauza, za mało mowy) segment zostaje otwarty i
-            // zbiera dalej — trafiamy do gałęzi `else` niżej.
+        } else if silence_run >= self.silence_to_end(buffer.len()) {
+            // Cisza przekroczyła próg domykający dla tej długości
+            // wypowiedzi — uznajemy ją za skończoną.
             let result = self.finalize(buffer, speech_samples, self.consumed);
             (
                 State::Idle {
@@ -283,6 +274,21 @@ impl Segmenter {
                 },
                 None,
             )
+        }
+    }
+
+    /// Próg ciszy domykającej segment o podanej długości bufora.
+    ///
+    /// Krótka wypowiedź dostaje długi próg — użytkownik ma czas na
+    /// zastanowienie przed trudnym słowem. Gdy mówi już dłużej niż
+    /// `long_segment_ms`, jest w rytmie: wtedy każda pauza kończy segment
+    /// niemal natychmiast i tekst płynie na ekran w trakcie mówienia
+    /// (`docs/07-zachowanie-dyktowania.md`).
+    fn silence_to_end(&self, buffer_len: usize) -> usize {
+        if buffer_len > self.long_segment_samples {
+            self.silence_to_end_long_samples
+        } else {
+            self.silence_to_end_samples
         }
     }
 
@@ -327,15 +333,9 @@ mod tests {
 
     #[test]
     fn mowa_potem_cisza_zwraca_segment_dokladnie_raz() {
-        // target_speech_ms: 0, żeby ten test sprawdzał wyłącznie domykanie
-        // zwykłym hangoverem (bez czekania na target) — tak jak przed
-        // wprowadzeniem reguły "zbieraj do target_speech_ms".
-        let config = SegmenterConfig {
-            target_speech_ms: 0,
-            ..SegmenterConfig::default()
-        };
+        let config = SegmenterConfig::default();
         let pre_roll_samples = ms_to_samples(config.pre_roll_ms);
-        let hangover_samples = ms_to_samples(config.hangover_ms);
+        let silence_samples = ms_to_samples(config.silence_ms_to_end);
         let mut seg = Segmenter::new(config);
 
         // Trochę ciszy przed mową — mniej niż limit pre-rolla, więc w
@@ -351,8 +351,8 @@ mod tests {
             assert!(seg.push(&frame(1.0), true).is_none());
         }
 
-        // Cisza aż do przekroczenia hangover_ms.
-        let silence_frames_needed = hangover_samples.div_ceil(CHUNK);
+        // Cisza aż do przekroczenia silence_ms_to_end.
+        let silence_frames_needed = silence_samples.div_ceil(CHUNK);
         let mut result = None;
         for i in 0..silence_frames_needed {
             let r = seg.push(&frame(0.0), false);
@@ -378,12 +378,7 @@ mod tests {
 
     #[test]
     fn pre_roll_dokleja_probki_sprzed_poczatku_mowy() {
-        // target_speech_ms: 0 — ten test sprawdza pre-roll i domykanie
-        // hangoverem, nie regułę zbierania do target_speech_ms.
-        let config = SegmenterConfig {
-            target_speech_ms: 0,
-            ..SegmenterConfig::default()
-        };
+        let config = SegmenterConfig::default();
         let pre_roll_samples = ms_to_samples(config.pre_roll_ms);
         let mut seg = Segmenter::new(config);
 
@@ -400,9 +395,9 @@ mod tests {
             assert!(seg.push(&frame(3.0), true).is_none());
         }
 
-        // Domykamy hangoverem.
-        let hangover_samples = ms_to_samples(config.hangover_ms);
-        let silence_frames_needed = hangover_samples.div_ceil(CHUNK);
+        // Domykamy zwykłym progiem ciszy.
+        let silence_samples = ms_to_samples(config.silence_ms_to_end);
+        let silence_frames_needed = silence_samples.div_ceil(CHUNK);
         let mut segment = None;
         for _ in 0..silence_frames_needed {
             if let Some(s) = seg.push(&frame(0.0), false) {
@@ -421,20 +416,15 @@ mod tests {
 
     #[test]
     fn krotkie_stukniecie_ponizej_min_speech_jest_odrzucone() {
-        // target_speech_ms: 0 — ten test sprawdza filtr min_speech_ms i
-        // powrót do nasłuchu, nie regułę zbierania do target_speech_ms.
-        let config = SegmenterConfig {
-            target_speech_ms: 0,
-            ..SegmenterConfig::default()
-        };
-        let hangover_samples = ms_to_samples(config.hangover_ms);
+        let config = SegmenterConfig::default();
+        let silence_samples = ms_to_samples(config.silence_ms_to_end);
         let mut seg = Segmenter::new(config);
 
         // 2 ramki mowy = 1024 próbek < min_speech_samples (4800).
         assert!(seg.push(&frame(1.0), true).is_none());
         assert!(seg.push(&frame(1.0), true).is_none());
 
-        let silence_frames_needed = hangover_samples.div_ceil(CHUNK);
+        let silence_frames_needed = silence_samples.div_ceil(CHUNK);
         for _ in 0..silence_frames_needed {
             assert!(
                 seg.push(&frame(0.0), false).is_none(),
@@ -462,10 +452,10 @@ mod tests {
     fn mowa_dluzsza_niz_max_segment_jest_przycieta() {
         let config = SegmenterConfig {
             pre_roll_ms: 0,
-            hangover_ms: 1_000,
+            silence_ms_to_end: 1_000,
+            silence_ms_to_end_long: 1_000,
+            long_segment_ms: 1_000,
             min_speech_ms: 0,
-            target_speech_ms: 0,
-            long_silence_ms: 1_000,
             max_segment_ms: 100, // 100 ms = 1600 próbek przy 16 kHz
         };
         let max_samples = ms_to_samples(config.max_segment_ms);
@@ -502,22 +492,19 @@ mod tests {
         // Po flushu nie ma już nic do domknięcia.
         assert!(seg.flush().is_none());
     }
-
     #[test]
-    fn krotka_pauza_ponizej_target_nie_dzieli_wypowiedzi_na_dwa_segmenty() {
-        // target_speech_ms wyraźnie większy niż suma dwóch krótkich
-        // wypowiedzi — segment ma zostać otwarty przez całą krótką pauzę
-        // (dłuższą niż hangover_ms, krótszą niż long_silence_ms) i zebrać
-        // obie wypowiedzi razem.
+    fn pauza_krotsza_niz_prog_nie_dzieli_wypowiedzi_na_dwa_segmenty() {
+        // Dopóki wypowiedź jest krótka, pauza poniżej `silence_ms_to_end`
+        // jest zawahaniem, a nie końcem zdania — obie części mają trafić
+        // do jednego segmentu.
         let config = SegmenterConfig {
             pre_roll_ms: 0,
-            hangover_ms: 300,
+            silence_ms_to_end: 1_500,
+            silence_ms_to_end_long: 200,
+            long_segment_ms: 2_500,
             min_speech_ms: 100,
-            target_speech_ms: 5_000,
-            long_silence_ms: 2_000,
             max_segment_ms: 15_000,
         };
-        let hangover_samples = ms_to_samples(config.hangover_ms);
         let mut seg = Segmenter::new(config);
 
         // Pierwsza krótka wypowiedź.
@@ -525,13 +512,12 @@ mod tests {
             assert!(seg.push(&frame(1.0), true).is_none());
         }
 
-        // Krótka pauza — dłuższa niż hangover_ms, ale za mało mowy jak na
-        // target_speech_ms, więc segment MA zostać otwarty (brak Some).
-        let pause_frames = hangover_samples.div_ceil(CHUNK) + 2;
+        // Pauza krótsza niż `silence_ms_to_end` (6 ramek = 192 ms).
+        let pause_frames = 6;
         for _ in 0..pause_frames {
             assert!(
                 seg.push(&frame(0.0), false).is_none(),
-                "segment nie powinien domknąć się w trakcie krótkiej pauzy"
+                "segment nie powinien domknąć się na krótkiej pauzie"
             );
         }
 
@@ -543,80 +529,123 @@ mod tests {
         // Dopiero flush domyka — potwierdza, że przez cały czas był to
         // jeden, wciąż otwarty segment, a nie dwa oddzielnie zwrócone.
         let segment = seg.flush().expect("flush powinien domknąć zebrany segment");
-        let expected_len = (6 + pause_frames + 6) * CHUNK;
-        assert_eq!(segment.audio.len(), expected_len);
+        assert_eq!(segment.audio.len(), (6 + pause_frames + 6) * CHUNK);
     }
 
     #[test]
-    fn dluga_cisza_domyka_segment_mimo_niezebranego_targetu() {
-        // target_speech_ms nieosiągalny w tym teście — segment ma się
-        // domknąć wyłącznie dzięki przekroczeniu long_silence_ms.
+    fn krotka_wypowiedz_czeka_na_dlugi_prog_ciszy() {
+        // Wypowiedź poniżej `long_segment_ms` domyka dopiero pełny
+        // `silence_ms_to_end` — krótsza cisza ma ją zostawić otwartą.
         let config = SegmenterConfig {
             pre_roll_ms: 0,
-            hangover_ms: 300,
+            silence_ms_to_end: 1_500,
+            silence_ms_to_end_long: 200,
+            long_segment_ms: 2_500,
             min_speech_ms: 100,
-            target_speech_ms: 5_000,
-            long_silence_ms: 1_000,
             max_segment_ms: 15_000,
         };
-        let long_silence_samples = ms_to_samples(config.long_silence_ms);
+        let short_silence_frames = ms_to_samples(config.silence_ms_to_end_long).div_ceil(CHUNK);
+        let full_silence_frames = ms_to_samples(config.silence_ms_to_end).div_ceil(CHUNK);
         let mut seg = Segmenter::new(config);
 
-        // Krótka wypowiedź — wyraźnie poniżej target_speech_ms.
-        for _ in 0..6 {
+        // 1 s mowy — wyraźnie poniżej long_segment_ms.
+        for _ in 0..32 {
             assert!(seg.push(&frame(1.0), true).is_none());
         }
 
-        // Cisza aż do przekroczenia long_silence_ms.
-        let silence_frames_needed = long_silence_samples.div_ceil(CHUNK);
+        // Krótki próg nie wystarcza: po tylu ramkach ciszy segment nadal trwa.
+        for _ in 0..short_silence_frames {
+            assert!(
+                seg.push(&frame(0.0), false).is_none(),
+                "krótka wypowiedź nie powinna domykać się krótkim progiem"
+            );
+        }
+
+        // Dopiero pełny próg domyka.
         let mut result = None;
-        for i in 0..silence_frames_needed {
+        for _ in short_silence_frames..full_silence_frames {
+            result = seg.push(&frame(0.0), false).or(result);
+        }
+        result.expect("po silence_ms_to_end krótka wypowiedź powinna się domknąć");
+    }
+
+    #[test]
+    fn dluga_wypowiedz_domyka_sie_juz_na_krotkiej_pauzie() {
+        // Sedno adaptacyjnego progu: gdy mówiący jest w rytmie dłużej niż
+        // `long_segment_ms`, pauza między zdaniami ma natychmiast wypchnąć
+        // tekst na ekran, zamiast kazać czekać na pełny `silence_ms_to_end`.
+        let config = SegmenterConfig {
+            pre_roll_ms: 0,
+            silence_ms_to_end: 1_500,
+            silence_ms_to_end_long: 300,
+            long_segment_ms: 1_000,
+            min_speech_ms: 100,
+            max_segment_ms: 15_000,
+        };
+        let short_silence_frames = ms_to_samples(config.silence_ms_to_end_long).div_ceil(CHUNK);
+        let full_silence_frames = ms_to_samples(config.silence_ms_to_end).div_ceil(CHUNK);
+        let mut seg = Segmenter::new(config);
+
+        // 1,5 s mowy — powyżej long_segment_ms (1 s).
+        for _ in 0..48 {
+            assert!(seg.push(&frame(1.0), true).is_none());
+        }
+
+        let mut result = None;
+        for i in 0..short_silence_frames {
             let r = seg.push(&frame(0.0), false);
-            if i + 1 < silence_frames_needed {
+            if i + 1 < short_silence_frames {
                 assert!(r.is_none(), "segment domknął się za wcześnie");
             } else {
                 result = r;
             }
         }
 
-        result.expect("długa cisza powinna domknąć segment mimo za małej ilości mowy");
+        result.expect("długa wypowiedź powinna domknąć się już po silence_ms_to_end_long");
+        assert!(
+            short_silence_frames < full_silence_frames,
+            "test ma sens tylko wtedy, gdy krótki próg jest istotnie krótszy"
+        );
     }
 
     #[test]
-    fn material_powyzej_targetu_domyka_sie_na_zwyklym_hangoverze() {
-        // Gdy mowy jest już co najmniej target_speech_ms, zwykły
-        // hangover_ms wystarcza do domknięcia — nie trzeba czekać na
-        // dużo dłuższy long_silence_ms.
+    fn wypowiedz_dokladnie_na_progu_uzywa_jeszcze_dlugiej_ciszy() {
+        // Granica jest ostra: na krótki próg przechodzimy dopiero POWYŻEJ
+        // `long_segment_ms`, nie dokładnie na nim. Liczby dobrane tak, by
+        // krótki próg ciszy dopełniał się w tej samej ramce, w której bufor
+        // osiąga dokładnie `long_segment_ms` — zamiana `>` na `>=` w regule
+        // wywala ten test.
         let config = SegmenterConfig {
             pre_roll_ms: 0,
-            hangover_ms: 300,
+            silence_ms_to_end: 1_500,
+            silence_ms_to_end_long: 320, // 5120 próbek = 10 ramek
+            long_segment_ms: 992,        // 15872 próbek = 31 ramek
             min_speech_ms: 100,
-            target_speech_ms: 150, // 150 ms = 2400 próbek
-            long_silence_ms: 2_000,
             max_segment_ms: 15_000,
         };
-        let hangover_samples = ms_to_samples(config.hangover_ms);
+        let long_segment_samples = ms_to_samples(config.long_segment_ms);
+        let short_silence_frames = ms_to_samples(config.silence_ms_to_end_long) / CHUNK;
+        let speech_frames = long_segment_samples / CHUNK - short_silence_frames;
         let mut seg = Segmenter::new(config);
 
-        // 6 ramek mowy = 3072 próbki > target_speech_samples (2400).
-        for _ in 0..6 {
+        for _ in 0..speech_frames {
             assert!(seg.push(&frame(1.0), true).is_none());
         }
 
-        // Cisza aż do przekroczenia hangover_ms — segment MA domknąć się
-        // tutaj, dużo przed long_silence_ms.
-        let silence_frames_needed = hangover_samples.div_ceil(CHUNK);
-        let mut result = None;
-        for i in 0..silence_frames_needed {
-            let r = seg.push(&frame(0.0), false);
-            if i + 1 < silence_frames_needed {
-                assert!(r.is_none(), "segment domknął się za wcześnie");
-            } else {
-                result = r;
-            }
+        // Po tych ramkach bufor ma dokładnie `long_segment_ms`, a cisza
+        // dokładnie `silence_ms_to_end_long`. Obowiązuje jeszcze długi próg,
+        // więc segment ma pozostać otwarty.
+        for _ in 0..short_silence_frames {
+            assert!(
+                seg.push(&frame(0.0), false).is_none(),
+                "na samym progu długości obowiązuje jeszcze silence_ms_to_end"
+            );
         }
 
-        result.expect("segment z materiałem powyżej targetu powinien domknąć się na hangoverze");
+        // Kolejna ramka przekracza próg długości — teraz krótki próg
+        // (już przekroczony) domyka segment natychmiast.
+        seg.push(&frame(0.0), false)
+            .expect("powyżej progu długości krótka cisza powinna domknąć segment");
     }
 }
 
@@ -635,12 +664,9 @@ mod timeline_tests {
         // Oś czasu audio jest jedynym prawdziwym porządkiem wypowiedzi
         // (docs/02), więc segmenter musi podać, gdzie w nagraniu leży
         // zwrócony wycinek — a nie tylko same próbki.
-        let config = SegmenterConfig {
-            target_speech_ms: 0,
-            ..SegmenterConfig::default()
-        };
+        let config = SegmenterConfig::default();
         let pre_roll_samples = ms_to_samples(config.pre_roll_ms);
-        let hangover_samples = ms_to_samples(config.hangover_ms);
+        let silence_samples = ms_to_samples(config.silence_ms_to_end);
         let mut seg = Segmenter::new(config);
 
         // Dużo ciszy na początku — więcej, niż mieści pre-roll, żeby
@@ -653,7 +679,7 @@ mod timeline_tests {
         for _ in 0..speech_frames {
             assert!(seg.push(&frame(1.0), true).is_none());
         }
-        let silence_frames = hangover_samples.div_ceil(CHUNK);
+        let silence_frames = silence_samples.div_ceil(CHUNK);
         let mut result = None;
         for _ in 0..silence_frames {
             result = seg.push(&frame(0.0), false).or(result);
@@ -673,13 +699,12 @@ mod timeline_tests {
     #[test]
     fn kolejne_segmenty_nie_nachodza_na_siebie_w_osi_czasu() {
         let config = SegmenterConfig {
-            target_speech_ms: 0,
             pre_roll_ms: 0,
             ..SegmenterConfig::default()
         };
-        let hangover_samples = ms_to_samples(config.hangover_ms);
+        let silence_samples = ms_to_samples(config.silence_ms_to_end);
         let mut seg = Segmenter::new(config);
-        let silence_frames = hangover_samples.div_ceil(CHUNK);
+        let silence_frames = silence_samples.div_ceil(CHUNK);
 
         let mut segments = Vec::new();
         for _ in 0..2 {

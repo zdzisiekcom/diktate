@@ -49,10 +49,10 @@ level_interval_ms = 50        # odstęp odczytów poziomu do wskaźnika (~20 Hz)
 
 [vad]
 threshold = 0.5               # próg decyzyjny Silero, 0.0–1.0
-hangover_ms = 700             # cisza domykająca segment, gdy mowy już dość
+silence_ms_to_end = 1500      # cisza domykająca krótką wypowiedź
+silence_ms_to_end_long = 200  # cisza domykająca wypowiedź już rozpędzoną
+long_segment_ms = 2500        # od tej długości obowiązuje krótszy próg
 min_speech_ms = 300           # krótsze odrzucane jako trzask
-target_speech_ms = 6000       # ile mowy zebrać, zanim domkniemy hangoverem
-long_silence_ms = 2000        # cisza domykająca zawsze — wyraźna przerwa
 max_segment_ms = 15000        # twarde cięcie (okno whispera to 30 s)
 
 [whisper]
@@ -63,7 +63,7 @@ initial_prompt = ""           # terminologia i nazwy własne
 beam_size = 1                 # 1 = dekodowanie zachłanne
 
 [queue]
-max_pending_segments = 8
+max_pending_segments = 16
 ```
 
 To jest **całość** dzisiejszego `daemon.toml`. Walidacja odrzuca nieznane
@@ -76,14 +76,27 @@ tej samej pracy co journal.
 
 ### Dlaczego progi VAD nazywają się właśnie tak
 
-Pierwsza wersja tego dokumentu opisywała progi w kategoriach „krótka
-wypowiedź / długa wypowiedź" i dwóch różnych czasów ciszy. Implementacja
-poszła inną drogą, świadomie: whisper przetwarza zawsze okno **30 sekund**,
-więc koszt jednego segmentu jest stały niezależnie od jego długości —
-dwusekundowy urywek kosztuje tyle samo, co dziesięciosekundowa wypowiedź.
-Dlatego segmenter nie tnie na każdej pauzie, tylko **zbiera materiał** do
-`target_speech_ms` i dopiero wtedy pozwala zwykłej ciszy (`hangover_ms`)
-domknąć segment. Wyraźna przerwa (`long_silence_ms`) domyka zawsze.
+Próg ciszy jest **adaptacyjny**: dopóki wypowiedź trwa krócej niż
+`long_segment_ms`, domyka ją dopiero `silence_ms_to_end` — użytkownik ma czas
+na zastanowienie przed trudnym słowem. Gdy mówi już dłużej, obowiązuje
+`silence_ms_to_end_long` i każda pauza między zdaniami natychmiast wypycha
+tekst na ekran. Uzasadnienie rytmu:
+[07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md#rytm-adaptacyjny-próg-ciszy).
+
+O tempie pojawiania się tekstu decyduje w praktyce `long_segment_ms`, a nie
+`silence_ms_to_end_long`. Po każdym cięciu nowy segment startuje od zera i musi
+znów urosnąć do tego progu, zanim krótka cisza zacznie obowiązywać — skracanie
+samej pauzy niczego więc nie przyspiesza, dopóki próg długości zostaje wysoki
+(zmierzone na `testdata/jfk.wav`: 300 ms → 150 ms nie zmienia liczby segmentów,
+5000 ms → 2500 ms zmienia ją z dwóch na trzy).
+
+Ta segmentacja zakłada, że transkrypcja nadąża za mową, i przy `long_segment_ms
+= 2500` margines jest cienki: segment kosztuje ~2,8 s (`small-q5_1`, Vulkan)
+przy średniej długości ~3,4 s, czyli ~85% przepustowości. Dalsze obniżanie
+progu przewraca tę proporcję — kolejka zacznie rosnąć, a tekst pojawiać się
+**później**, nie wcześniej. Pomiary dla poszczególnych modeli i narzędzie,
+którym się je robi (`--example bench-model`), opisuje `CLAUDE.md`, sekcja
+„Wydajność transkrypcji".
 
 Progi powyżej są nazwane tak, jak pokrętła, które faktycznie istnieją
 w `SegmenterConfig` — jedna nazwa, jedno miejsce.
