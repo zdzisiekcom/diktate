@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+libc.workspace = true
 diktate-proto.workspace = true
 diktate-config.workspace = true
 # Zależność podana wprost ścieżką (zamiast `diktate-core.workspace = true`),

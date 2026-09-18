@@ -7,7 +7,10 @@
 //! zapisu jest dzielony przez `Arc<Mutex<UnixStream>>`: i pętla żądań
 //! (odpowiedzi), i wątek transkrypcji sesji (powiadomienia) piszą do niego
 //! pod tym samym zamkiem, żeby żadna linia NDJSON się nie przeplotła.
-use anyhow::{anyhow, Context, Result};
+mod cli;
+mod pidfile;
+
+use anyhow::{anyhow, bail, Context, Result};
 use diktate_config::DaemonConfig;
 use diktate_core::segmenter::SegmenterConfig;
 use diktate_core::{transcribe::default_model_path, Session, SessionConfig, Transcriber};
@@ -21,6 +24,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
+    match cli::parse(std::env::args().skip(1))? {
+        cli::Command::Help => {
+            println!("{}", cli::USAGE);
+            return Ok(());
+        }
+        cli::Command::Stop => return stop(),
+        cli::Command::Restart => replace_running(),
+        cli::Command::Run => {
+            // Dwa daemony na jednym gnieździe to cicha pułapka: ten młodszy
+            // przejmuje gniazdo, a starszy zostaje w pamięci z nieaktualną
+            // konfiguracją i wygląda, jakby zmiany „nie działały".
+            if let Some(pid) = pidfile::running() {
+                bail!(
+                    "daemon już działa (PID {pid}) — użyj --restart, żeby go zastąpić, \
+                     albo --stop, żeby go zatrzymać"
+                );
+            }
+        }
+    }
+
     // Błąd w konfiguracji zatrzymuje start z czytelnym komunikatem — nigdy
     // nie wracamy po cichu do wartości domyślnych (docs/04).
     let config = DaemonConfig::load().context("konfiguracja daemona")?;
@@ -43,7 +66,14 @@ fn main() -> Result<()> {
     }
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("nie udało się otworzyć gniazda {}", path.display()))?;
-    eprintln!("diktate-daemon: nasłuchuję na {}", path.display());
+    // Plik PID dopiero tutaj: wcześniejszy zapis obiecywałby działającego
+    // daemona, choć start mógł jeszcze polec na modelu albo na gnieździe.
+    pidfile::write_current()?;
+    eprintln!(
+        "diktate-daemon: nasłuchuję na {} (PID {})",
+        path.display(),
+        std::process::id()
+    );
 
     for stream in listener.incoming() {
         match stream {
@@ -55,7 +85,41 @@ fn main() -> Result<()> {
             Err(err) => eprintln!("diktate-daemon: nieudane połączenie: {err}"),
         }
     }
+    pidfile::remove();
     Ok(())
+}
+
+/// `--stop`: zatrzymuje działającego daemona. Brak daemona nie jest błędem —
+/// żądany stan („nie działa") i tak jest osiągnięty.
+fn stop() -> Result<()> {
+    match pidfile::running() {
+        Some(pid) => {
+            if pidfile::terminate(pid) {
+                pidfile::remove();
+                eprintln!("diktate-daemon: zatrzymany (PID {pid})");
+                Ok(())
+            } else {
+                Err(anyhow!("nie udało się zatrzymać procesu {pid}"))
+            }
+        }
+        None => {
+            eprintln!("diktate-daemon: żaden daemon nie działa");
+            Ok(())
+        }
+    }
+}
+
+/// `--restart`: robi miejsce dla siebie. Nieudane zatrzymanie poprzednika nie
+/// przerywa startu — gniazdo i tak przejmiemy, a komunikat wystarczy, żeby
+/// użytkownik wiedział, że ktoś został w pamięci.
+fn replace_running() {
+    if let Some(pid) = pidfile::running() {
+        if pidfile::terminate(pid) {
+            eprintln!("diktate-daemon: zastępuję poprzedni proces (PID {pid})");
+        } else {
+            eprintln!("diktate-daemon: nie udało się zatrzymać procesu {pid} — startuję mimo to");
+        }
+    }
 }
 
 /// Ścieżka modelu: z `daemon.toml`, a gdy puste — `$DIKTATE_MODEL` albo

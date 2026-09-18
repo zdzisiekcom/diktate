@@ -182,8 +182,19 @@ Daemon można też prowadzić ręcznie w osobnym terminalu — wtedy klient po
 prostu zastaje gotowe gniazdo:
 
 ```bash
-./target/debug/diktate-daemon
+./target/debug/diktate-daemon            # start; odmawia, gdy inny już działa
+./target/debug/diktate-daemon --restart  # zastąp działającego nowym procesem
+./target/debug/diktate-daemon --stop     # zatrzymaj działającego
 ```
+
+Daemon jest **jeden** na sesję użytkownika i pilnuje tego przez plik
+`$XDG_RUNTIME_DIR/diktate.pid`. Zwykły start przy działającym daemonie kończy
+się błędem zamiast po cichu przejąć gniazdo — inaczej starszy proces zostawał
+w pamięci z nieaktualną konfiguracją i zmiany wyglądały, jakby nie działały.
+Po zmianie `daemon.toml` albo po przebudowaniu binarki właściwym ruchem jest
+`--restart`: zatrzymuje poprzednika (`SIGTERM`, a po trzech sekundach
+`SIGKILL`) i wchodzi na jego miejsce. Nieaktualny plik PID — po `kill -9` albo
+restarcie maszyny — jest rozpoznawany i sprzątany, więc nie blokuje startu.
 
 W oknie: przycisk mikrofonu przełącza nagrywanie, wskaźnik pod paskiem
 nagłówka pokazuje poziom sygnału (brak wychyleń = złe urządzenie wejściowe),

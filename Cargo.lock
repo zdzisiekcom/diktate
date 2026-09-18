@@ -649,6 +649,7 @@ dependencies = [
  "diktate-config",
  "diktate-core",
  "diktate-proto",
+ "libc",
  "serde",
  "serde_json",
 ]
