@@ -1,10 +1,13 @@
-//! Rdzeń: przechwytywanie dźwięku i transkrypcja.
+//! Rdzeń: przechwytywanie dźwięku, VAD, segmentacja i transkrypcja.
 //!
-//! Etap 0 celowo nie ma VAD ani kolejki segmentów. Nagranie jest trzymane
-//! w pamięci w całości i transkrybowane jednym przebiegiem po zatrzymaniu.
+//! Poza wariantem z etapu 0 (całe nagranie w pamięci, transkrybowane jednym
+//! przebiegiem po zatrzymaniu — `Recorder::start`/`Recording::stop`, wciąż
+//! używane przez CLI) jest teraz `session`: strumieniowy potok spinający
+//! przechwytywanie, VAD, segmenter i transkrypcję w jedną, trwającą sesję.
 
 pub mod capture;
 pub mod segmenter;
+pub mod session;
 pub mod transcribe;
 pub mod vad;
 
@@ -12,4 +15,5 @@ pub mod vad;
 pub const SAMPLE_RATE: u32 = 16_000;
 
 pub use capture::{Recorder, Recording};
+pub use session::Session;
 pub use transcribe::Transcriber;
