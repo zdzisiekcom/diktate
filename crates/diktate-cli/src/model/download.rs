@@ -6,7 +6,6 @@
 //!
 //! Sieć siedzi za `Source`, żeby testy pobierania biegły na danych
 //! z pamięci — bez internetu i bez półgigowych plików.
-#![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -139,6 +138,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 /// Suma z danych w pamięci — używana przez testy pobierania do budowania
 /// oczekiwanej sumy modelu bez zapisywania jej ręcznie w każdym teście.
+#[allow(dead_code)]
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);

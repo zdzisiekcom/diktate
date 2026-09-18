@@ -36,6 +36,22 @@ enum Command {
         #[arg(long, default_value = "pl")]
         language: String,
     },
+    /// Modele whispera: lista i pobieranie.
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelAction {
+    /// Wypisz znane modele i zaznacz te, które już masz.
+    List,
+    /// Pobierz model do ~/.diktate/models.
+    Pull {
+        /// Nazwa z `diktate model list`.
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -47,6 +63,10 @@ fn main() -> Result<()> {
             wav,
             language,
         } => record(seconds, model, wav, language),
+        Command::Model { action } => match action {
+            ModelAction::List => model::cmd::list(),
+            ModelAction::Pull { name } => model::cmd::pull(&name).map(|_| ()),
+        },
     }
 }
 

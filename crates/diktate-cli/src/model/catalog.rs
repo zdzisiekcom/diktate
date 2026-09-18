@@ -4,7 +4,6 @@
 //! bez internetu i pokazywałoby warianty, których nikt tutaj nie chce.
 //! Czasy przebiegu i oceny polszczyzny pochodzą z pomiarów opisanych
 //! w `CLAUDE.md` („Wydajność transkrypcji"); dodanie modelu to jedna linijka.
-#![allow(dead_code)]
 
 use std::path::PathBuf;
 
@@ -99,6 +98,10 @@ pub fn find(name: &str) -> Option<&'static Model> {
 
 /// Model proponowany domyślnie. Katalog gwarantuje dokładnie jeden taki wpis
 /// (pilnuje tego test), więc brak wyniku byłby błędem w samym katalogu.
+///
+/// Na razie używane tylko przez testy — kreator z zadania 7 sięgnie po to
+/// jako domyślną odpowiedź pod Enterem.
+#[allow(dead_code)]
 pub fn recommended() -> &'static Model {
     MODELS
         .iter()

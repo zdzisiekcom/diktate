@@ -8,18 +8,15 @@
 use std::path::PathBuf;
 
 /// `~/.diktate/models` — katalog, do którego pobieramy.
-#[allow(dead_code)]
 pub fn models_dir() -> PathBuf {
     home().join(".diktate/models")
 }
 
 /// `~/models/whisper` — miejsce z czasów przed kreatorem.
-#[allow(dead_code)]
 pub fn legacy_models_dir() -> PathBuf {
     home().join("models/whisper")
 }
 
-#[allow(dead_code)]
 fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -27,7 +24,6 @@ fn home() -> PathBuf {
 }
 
 /// Ścieżka modelu, jeśli jest na dysku — w katalogu docelowym albo starym.
-#[allow(dead_code)]
 pub fn find(file: &str) -> Option<PathBuf> {
     find_in(&[models_dir(), legacy_models_dir()], file)
 }
