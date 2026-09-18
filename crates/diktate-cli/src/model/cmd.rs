@@ -25,12 +25,14 @@ pub fn list() -> Result<()> {
     println!("Katalog modeli: {}", store::models_dir().display());
     println!();
     for model in MODELS {
-        let stan = if model.installed().is_some() {
-            "masz"
-        } else if model.recommended {
-            "zalecany"
-        } else {
-            ""
+        // Model może być jednocześnie „masz" i „zalecany" — to dwie różne
+        // informacje (co leży na dysku i co kreator by zaproponował), więc
+        // obie mają się pokazać naraz, a nie przesłaniać nawzajem.
+        let stan = match (model.installed().is_some(), model.recommended) {
+            (true, true) => "masz, zalecany",
+            (true, false) => "masz",
+            (false, true) => "zalecany",
+            (false, false) => "",
         };
         println!(
             "  {:<22} {:>7}  {:>5.1} s/20 s  polszczyzna: {:<18} {}",
@@ -73,7 +75,17 @@ pub fn pull_model(model: &Model) -> Result<PathBuf> {
     let path = download(&Http, model, &store::models_dir(), &mut |done, total| {
         // Pasek przerysowywany co procent — częściej to tylko miganie
         // i zaśmiecony terminal, gdy ktoś przekierowuje wyjście do pliku.
-        let procent = done.checked_mul(100).and_then(|x| x.checked_div(total)).unwrap_or(0);
+        //
+        // `total` to rozmiar zadeklarowany w katalogu, a nie to, co
+        // faktycznie przyśle serwer — jeśli plik na HuggingFace urośnie
+        // ponad wpis w `MODELS`, `done` może go przekroczyć. Bez `.min(100)`
+        // procent poszedłby powyżej 100, a `50 - pełne` przepełniłoby
+        // `usize` i spanikowało w profilu dev.
+        let procent = done
+            .checked_mul(100)
+            .and_then(|x| x.checked_div(total))
+            .unwrap_or(0)
+            .min(100);
         if procent != ostatni {
             ostatni = procent;
             let pełne = (procent / 2) as usize;

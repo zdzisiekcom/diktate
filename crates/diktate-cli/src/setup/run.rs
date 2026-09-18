@@ -71,55 +71,62 @@ pub fn run(advanced: bool) -> Result<()> {
     }
 
     // --- rytm ---
-    // Progi spoza trzech profili to „profil własny" (docs/04) — kreatorowi
-    // nie wolno podmienić go po cichu, więc dokładamy do listy dodatkową
-    // pozycję, która zostawia progi bez zmian, i robimy z niej domyślną
-    // odpowiedź pod Enterem.
-    let mut options: Vec<String> = profile::RHYTHMS
-        .iter()
-        .map(|r| format!("{:<14} {} ms — {}", r.name, r.long_segment_ms, r.opis))
-        .collect();
-    let own_index = if profile::current(&daemon).is_none() {
-        options.push(format!(
-            "własny          — zostaw progi, które już masz (long_segment_ms = {}, \
-             silence_ms_to_end = {}, silence_ms_to_end_long = {})",
-            daemon.vad.long_segment_ms,
-            daemon.vad.silence_ms_to_end,
-            daemon.vad.silence_ms_to_end_long,
-        ));
-        Some(options.len() - 1)
-    } else {
-        None
-    };
-    let default_rhythm = match profile::current(&daemon) {
-        Some(r) => profile::RHYTHMS
+    // To pytanie należy tylko do krótkiej ścieżki (docs/04, „Krótka
+    // ścieżka"): `--advanced` „przechodzi zamiast tego przez każde pole po
+    // kolei", więc pyta wprost o `vad.long_segment_ms` i resztę w
+    // `ask_rest` — bez tej osłony zadalibyśmy o te same trzy progi dwa razy,
+    // raz jako profil, raz jako pola.
+    if !advanced {
+        // Progi spoza trzech profili to „profil własny" (docs/04) — kreatorowi
+        // nie wolno podmienić go po cichu, więc dokładamy do listy dodatkową
+        // pozycję, która zostawia progi bez zmian, i robimy z niej domyślną
+        // odpowiedź pod Enterem.
+        let mut options: Vec<String> = profile::RHYTHMS
             .iter()
-            .position(|x| x.name == r.name)
-            .unwrap_or(1),
-        None => own_index.expect("own_index ustawiony, gdy current() zwraca None"),
-    };
-    // Odmowa ostrzeżenia o zbyt szybkim rytmie wraca tylko do tego pytania —
-    // nie do całego kreatora, żeby nie gubić odpowiedzi z bieżącej sesji.
-    let chosen_rhythm = loop {
-        let choice = dialog::ask_choice("Rytm segmentacji?", &options, default_rhythm)?;
-        if Some(choice) == own_index {
-            break None;
-        }
-        let rhythm = &profile::RHYTHMS[choice];
-        if profile::too_fast_for(rhythm, model.run_ms) {
-            println!(
-                "\nUwaga: przy modelu {} segment w tym rytmie kosztuje więcej, niż trwa.",
-                model.name
-            );
-            println!("Kolejka będzie rosła, a tekst pojawiał się coraz później, nie wcześniej.");
-            if !dialog::ask_bool("Mimo to ustawić ten rytm?", false)? {
-                continue;
+            .map(|r| format!("{:<14} {} ms — {}", r.name, r.long_segment_ms, r.opis))
+            .collect();
+        let own_index = if profile::current(&daemon).is_none() {
+            options.push(format!(
+                "własny          — zostaw progi, które już masz (long_segment_ms = {}, \
+                 silence_ms_to_end = {}, silence_ms_to_end_long = {})",
+                daemon.vad.long_segment_ms,
+                daemon.vad.silence_ms_to_end,
+                daemon.vad.silence_ms_to_end_long,
+            ));
+            Some(options.len() - 1)
+        } else {
+            None
+        };
+        let default_rhythm = match profile::current(&daemon) {
+            Some(r) => profile::RHYTHMS
+                .iter()
+                .position(|x| x.name == r.name)
+                .unwrap_or(1),
+            None => own_index.expect("own_index ustawiony, gdy current() zwraca None"),
+        };
+        // Odmowa ostrzeżenia o zbyt szybkim rytmie wraca tylko do tego pytania —
+        // nie do całego kreatora, żeby nie gubić odpowiedzi z bieżącej sesji.
+        let chosen_rhythm = loop {
+            let choice = dialog::ask_choice("Rytm segmentacji?", &options, default_rhythm)?;
+            if Some(choice) == own_index {
+                break None;
             }
+            let rhythm = &profile::RHYTHMS[choice];
+            if profile::too_fast_for(rhythm, model.run_ms) {
+                println!(
+                    "\nUwaga: przy modelu {} segment w tym rytmie kosztuje więcej, niż trwa.",
+                    model.name
+                );
+                println!("Kolejka będzie rosła, a tekst pojawiał się coraz później, nie wcześniej.");
+                if !dialog::ask_bool("Mimo to ustawić ten rytm?", false)? {
+                    continue;
+                }
+            }
+            break Some(rhythm);
+        };
+        if let Some(rhythm) = chosen_rhythm {
+            profile::apply(&mut daemon.vad, rhythm);
         }
-        break Some(rhythm);
-    };
-    if let Some(rhythm) = chosen_rhythm {
-        profile::apply(&mut daemon.vad, rhythm);
     }
 
     // --- GTK ---

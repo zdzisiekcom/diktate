@@ -96,22 +96,22 @@ pub fn find(name: &str) -> Option<&'static Model> {
     MODELS.iter().find(|m| m.name == name)
 }
 
-/// Model proponowany domyślnie. Katalog gwarantuje dokładnie jeden taki wpis
-/// (pilnuje tego test), więc brak wyniku byłby błędem w samym katalogu.
-///
-/// Na razie używane tylko przez testy — kreator z zadania 7 sięgnie po to
-/// jako domyślną odpowiedź pod Enterem.
-#[allow(dead_code)]
-pub fn recommended() -> &'static Model {
-    MODELS
-        .iter()
-        .find(|m| m.recommended)
-        .expect("katalog modeli bez rekomendacji — sprzeczne z testem spójności")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Model proponowany domyślnie. Katalog gwarantuje dokładnie jeden taki
+    /// wpis (pilnuje tego test niżej), więc brak wyniku byłby błędem
+    /// w samym katalogu. Kreator (`setup::run`) wybiera rekomendację przez
+    /// `.position(|m| m.recommended)` wprost, bo potrzebuje przy okazji
+    /// indeksu do listy opcji — ta funkcja została więc tylko pomocą
+    /// testów, sprawdzającą katalog niezależnie od kodu kreatora.
+    fn recommended() -> &'static Model {
+        MODELS
+            .iter()
+            .find(|m| m.recommended)
+            .expect("katalog modeli bez rekomendacji — sprzeczne z testem spójności")
+    }
 
     #[test]
     fn nazwy_są_unikalne() {

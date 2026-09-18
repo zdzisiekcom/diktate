@@ -136,15 +136,6 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
-/// Suma z danych w pamięci — używana przez testy pobierania do budowania
-/// oczekiwanej sumy modelu bez zapisywania jej ręcznie w każdym teście.
-#[allow(dead_code)]
-pub fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex(&hasher.finalize())
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -155,6 +146,14 @@ mod tests {
     use crate::model::catalog::Polish;
     use std::cell::Cell;
     use std::io::Cursor;
+
+    /// Suma z danych w pamięci — do budowania oczekiwanej sumy modelu
+    /// w testach, bez zapisywania jej ręcznie w każdym z nich.
+    fn sha256_hex(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hex(&hasher.finalize())
+    }
 
     /// Źródło z pamięci — testy nie dotykają sieci. Liczy wywołania
     /// `fetch`, żeby dało się sprawdzić, że sieć w ogóle nie została
