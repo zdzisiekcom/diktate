@@ -75,6 +75,48 @@ Tekst jest **edytowalny również klawiaturą** — `GtkTextView` nie jest tylko
 odczytu. Edycje z klawiatury stają się operacjami `SetText` w tym samym logu,
 co poprawki głosowe, więc `Ctrl+Z` działa na jedne i drugie jednolicie.
 
+## Konwencje widoków
+
+Obowiązują **każdy** widok w `diktate-gtk` — okno dyktowania, ustawienia,
+przeglądarkę historii i cokolwiek dojdzie później. Nowy widok, który je łamie,
+jest błędem, nawet jeśli działa.
+
+**Okno bez osobnego paska tytułowego.** `adw::ApplicationWindow` z
+`adw::ToolbarView` i `adw::HeaderBar` jako górnym paskiem. Nigdy
+`gtk::ApplicationWindow` z `set_titlebar` — to daje odcięty pasek systemowy
+zamiast paska wtopionego w okno, co od razu wygląda obco na GNOME.
+
+**Motyw idzie za systemem.** `adw::StyleManager` z `ColorScheme::Default`.
+Nie wymuszamy jasnego ani ciemnego, nie doklejamy własnych kolorów tła,
+nie nadpisujemy palety Adwaity. Kolory bierzemy z klas nazwanych
+(`suggested-action`, `destructive-action`, `error`, `warning`, `dim-label`),
+nie z literałów.
+
+**Tytuł dwupoziomowy zamiast paska stanu.** `adw::WindowTitle`: tytuł to nazwa
+widoku, podtytuł to stan („Gotowe", „Nagrywam…", „Brak daemona"). Osobna
+etykieta statusu pod treścią jest zabroniona — zjada miejsce i nie jest tam,
+gdzie użytkownik GNOME jej szuka.
+
+**Akcje jako ikony symboliczne w pasku**, z podpowiedziami (`tooltip`).
+Podpisy tekstowe tylko tam, gdzie ikona byłaby zagadką. Nazwy ikon zawsze
+z sufiksem `-symbolic`.
+
+**Pusty stan to `adw::StatusPage`**, nie puste pole. Ikona, tytuł i jedno
+zdanie mówiące, co zrobić. Przełączanie pusty/wypełniony przez `gtk::Stack`,
+w obie strony — skasowanie całej treści wraca do stanu pustego.
+
+**Potwierdzenia przez `adw::Toast`** w `adw::ToastOverlay`. Żadnych okien
+modalnych na „skopiowano", żadnych niemych akcji bez śladu.
+
+**Tekst w `adw::Clamp`.** Przy szerokim oknie kolumna tekstu nie rozciąga się
+na całą szerokość — tak samo jak w Ustawieniach i w Tekstowym.
+
+**Listy ustawień przez `adw::PreferencesGroup` i `adw::ActionRow`/`SwitchRow`**,
+nie ręcznie składane `Box`-y z etykietami. Grupy dostają nagłówki.
+
+**Teksty interfejsu po polsku**, z pełną ortografią. Nazwy widżetów, zmiennych
+i klas CSS po angielsku — jak w reszcie kodu.
+
 ## Ikona w tray-u
 
 Wymaganie: aplikacja ma rezydować w tray-u jako ikona.
