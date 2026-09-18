@@ -10,7 +10,8 @@
 use anyhow::{anyhow, Context, Result};
 use diktate_core::{transcribe::default_model_path, Session, Transcriber};
 use diktate_proto::{
-    socket_path, Notification, Request, Response, METHOD_SESSION_START, METHOD_SESSION_STOP,
+    socket_path, Notification, Request, Response, SessionState, METHOD_SESSION_START,
+    METHOD_SESSION_STOP,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -77,16 +78,41 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                     continue;
                 }
                 let notify_writer = Arc::clone(&writer);
-                match Session::start(Arc::clone(transcriber), move |text| {
-                    eprintln!("diktate-daemon: {text}");
-                    if let Err(err) = send(&notify_writer, &Notification::segment_final(text)) {
-                        eprintln!("diktate-daemon: nie udało się wysłać powiadomienia: {err:#}");
-                    }
-                }) {
+                let backlog_writer = Arc::clone(&writer);
+                match Session::start(
+                    Arc::clone(transcriber),
+                    move |text| {
+                        eprintln!("diktate-daemon: {text}");
+                        if let Err(err) = send(&notify_writer, &Notification::segment_final(text))
+                        {
+                            eprintln!(
+                                "diktate-daemon: nie udało się wysłać powiadomienia: {err:#}"
+                            );
+                        }
+                    },
+                    move |backlog| {
+                        eprintln!("diktate-daemon: zaległość kolejki: {backlog}");
+                        if let Err(err) = send(
+                            &backlog_writer,
+                            &Notification::state_changed(SessionState::Recording, backlog),
+                        ) {
+                            eprintln!(
+                                "diktate-daemon: nie udało się wysłać powiadomienia o stanie: {err:#}"
+                            );
+                        }
+                    },
+                ) {
                     Ok(new_session) => {
                         session = Some(new_session);
                         send(&writer, &Response::ok(request.id))?;
                         eprintln!("diktate-daemon: nagrywam (strumieniowo)");
+                        if let Err(err) =
+                            send(&writer, &Notification::state_changed(SessionState::Recording, 0))
+                        {
+                            eprintln!(
+                                "diktate-daemon: nie udało się wysłać powiadomienia o stanie: {err:#}"
+                            );
+                        }
                     }
                     Err(err) => {
                         send(
@@ -111,6 +137,17 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
                     Ok(()) => {
                         send(&writer, &Response::ok(request.id))?;
                         eprintln!("diktate-daemon: sesja zatrzymana");
+                        // Powiadomienie o przejściu w stan bezczynności idzie
+                        // dopiero teraz, po `stop()` — dopiero wtedy cała
+                        // zakolejkowana transkrypcja na pewno dotarła do
+                        // klienta (patrz komentarz modułu).
+                        if let Err(err) =
+                            send(&writer, &Notification::state_changed(SessionState::Idle, 0))
+                        {
+                            eprintln!(
+                                "diktate-daemon: nie udało się wysłać powiadomienia o stanie: {err:#}"
+                            );
+                        }
                     }
                     Err(err) => {
                         send(
@@ -133,8 +170,24 @@ fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
     // trzeba ją zatrzymać, żeby nie zostawić działającego mikrofonu.
     if let Some(active) = session.take() {
         eprintln!("diktate-daemon: klient rozłączony w trakcie sesji, zatrzymuję ją");
-        if let Err(err) = active.stop() {
-            eprintln!("diktate-daemon: błąd zatrzymania sesji po rozłączeniu klienta: {err:#}");
+        match active.stop() {
+            Ok(()) => {
+                // Klient już nie czyta z gniazda, ale wysyłamy mimo to —
+                // to spójne z resztą kodu i nieszkodliwe (co najwyżej
+                // zapis się nie uda, co i tak tylko logujemy).
+                if let Err(err) =
+                    send(&writer, &Notification::state_changed(SessionState::Idle, 0))
+                {
+                    eprintln!(
+                        "diktate-daemon: nie udało się wysłać powiadomienia o stanie: {err:#}"
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "diktate-daemon: błąd zatrzymania sesji po rozłączeniu klienta: {err:#}"
+                );
+            }
         }
     }
 

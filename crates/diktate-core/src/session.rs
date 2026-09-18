@@ -18,10 +18,17 @@
 //! stderr), a nie kolejkowany — wątek segmentujący nigdy się nie blokuje na
 //! wątku transkrypcji.
 //!
+//! Moduł raportuje też na bieżąco zaległość kolejki transkrypcji (ile
+//! wypowiedzi czeka na przetworzenie plus ta aktualnie transkrybowana) przez
+//! callback `on_backlog` w [`Session::start`] — patrz [`Backlog`]. Dzięki
+//! temu okno wie, czy to, co ktoś właśnie powiedział, już dotarło na ekran,
+//! czy jeszcze się liczy.
+//!
 //! `Session::stop` zatrzymuje capture, domyka ewentualny trwający segment
 //! przez `Segmenter::flush`, i dopiero po dokończeniu przez wątek
 //! transkrypcji tego, co miał już w kolejce, wraca do wywołującego.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -66,6 +73,51 @@ impl FrameAssembler {
     }
 }
 
+/// Licznik zaległości kolejki transkrypcji: liczba segmentów czekających w
+/// kolejce plus ten aktualnie transkrybowany. [`Session::start`] dzieli go
+/// (przez `Arc`) między wątek segmentujący, który zwiększa go o 1 po każdym
+/// udanym wysłaniu segmentu do kolejki ([`dispatch_segment`]), a wątek
+/// transkrypcji, który zmniejsza go o 1 po zakończeniu obsługi segmentu —
+/// niezależnie od tego, czy wynik trafił do `on_segment`, czy został
+/// odrzucony przez filtr. Segment porzucony z powodu pełnej kolejki nigdy
+/// nie trafił do kolejki, więc licznika nie dotyczy. Przy każdej zmianie
+/// woła `on_change` z nową wartością.
+struct Backlog<G> {
+    count: AtomicU32,
+    on_change: G,
+}
+
+impl<G: Fn(u32)> Backlog<G> {
+    fn new(on_change: G) -> Self {
+        Self {
+            count: AtomicU32::new(0),
+            on_change,
+        }
+    }
+
+    /// Nowy segment trafił do kolejki transkrypcji — zaległość rośnie o 1.
+    fn inc(&self) {
+        let new = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+        (self.on_change)(new);
+    }
+
+    /// Segment przestał być zaległością (obsłużony albo odrzucony przez
+    /// filtr) — zaległość maleje o 1.
+    fn dec(&self) {
+        let new = self.count.fetch_sub(1, Ordering::SeqCst) - 1;
+        (self.on_change)(new);
+    }
+
+    /// Wymusza `on_change(0)` niezależnie od bieżącej wartości. Wołane po
+    /// zakończeniu pracy wątku transkrypcji, żeby okno na pewno nie zostało
+    /// z „przetwarzam" na zawsze — także wtedy, gdy sesja nie miała ani
+    /// jednego segmentu i licznik nigdy się nie zmienił.
+    fn finish(&self) {
+        self.count.store(0, Ordering::SeqCst);
+        (self.on_change)(0);
+    }
+}
+
 /// Trwająca sesja: przechwytywanie + VAD + segmentacja + transkrypcja na
 /// bieżąco. Gotowy tekst każdego segmentu trafia do `on_segment` podanego
 /// przy [`Session::start`].
@@ -79,9 +131,14 @@ impl Session {
     /// Uruchamia mikrofon i dwa wątki robocze (segmentujący i transkrypcji).
     /// `on_segment` jest wołane z wątku transkrypcji dla każdego niepustego
     /// wyniku — musi być `Send + 'static`, bo żyje poza wątkiem wołającym.
-    pub fn start<F>(transcriber: Arc<Transcriber>, on_segment: F) -> Result<Self>
+    /// `on_backlog` jest wołane za każdym razem, gdy zmienia się liczba
+    /// zaległości kolejki transkrypcji (segmenty czekające plus ten aktualnie
+    /// transkrybowany) — patrz [`Backlog`]. Musi być `Send + Sync + 'static`,
+    /// bo jest dzielone między wątek segmentujący i wątek transkrypcji.
+    pub fn start<F, G>(transcriber: Arc<Transcriber>, on_segment: F, on_backlog: G) -> Result<Self>
     where
         F: Fn(String) + Send + 'static,
+        G: Fn(u32) + Send + Sync + 'static,
     {
         let vad = Vad::new().context("nie udało się utworzyć detektora VAD")?;
         let segmenter = Segmenter::new(SegmenterConfig::default());
@@ -91,13 +148,21 @@ impl Session {
             .context("nie udało się uruchomić przechwytywania strumieniowego")?;
 
         let (segment_tx, segment_rx) = mpsc::sync_channel::<Vec<f32>>(SEGMENT_QUEUE_CAPACITY);
+        let backlog = Arc::new(Backlog::new(on_backlog));
 
+        let segmenter_backlog = Arc::clone(&backlog);
         let segmenter_handle = std::thread::spawn(move || {
-            run_segmenter(chunk_rx, segment_tx, vad, segmenter);
+            run_segmenter(chunk_rx, segment_tx, vad, segmenter, &segmenter_backlog);
         });
 
+        let transcriber_backlog = Arc::clone(&backlog);
         let transcriber_handle = std::thread::spawn(move || {
-            run_transcriber(segment_rx, transcriber.as_ref(), on_segment);
+            run_transcriber(
+                segment_rx,
+                transcriber.as_ref(),
+                on_segment,
+                &transcriber_backlog,
+            );
         });
 
         Ok(Self {
@@ -134,18 +199,19 @@ impl Session {
 /// Ciało wątku segmentującego: porcje z capture -> ramki -> VAD -> Segmenter
 /// -> kolejka do transkrypcji. Kończy się, gdy `chunk_rx` się rozłączy (czyli
 /// po `capture.stop()`), po czym domyka ewentualny trwający segment.
-fn run_segmenter(
+fn run_segmenter<G: Fn(u32)>(
     chunk_rx: Receiver<Vec<f32>>,
     segment_tx: SyncSender<Vec<f32>>,
     mut vad: Vad,
     mut segmenter: Segmenter,
+    backlog: &Backlog<G>,
 ) {
     let mut assembler = FrameAssembler::new();
     while let Ok(chunk) = chunk_rx.recv() {
         for frame in assembler.push(&chunk) {
             let is_speech = vad.is_speech(&frame);
             if let Some(segment) = segmenter.push(&frame, is_speech) {
-                dispatch_segment(&segment_tx, segment);
+                dispatch_segment(&segment_tx, segment, backlog);
             }
         }
     }
@@ -153,7 +219,7 @@ fn run_segmenter(
     // jeśli jakiś był. Reszta niedopełniająca pełnej ramki w assemblerze
     // (poniżej 32 ms) przepada; to nieistotna strata na końcu nagrania.
     if let Some(segment) = segmenter.flush() {
-        dispatch_segment(&segment_tx, segment);
+        dispatch_segment(&segment_tx, segment, backlog);
     }
     // `segment_tx` spada tu wraz z końcem funkcji — to sygnał dla wątku
     // transkrypcji, że nic więcej nie przyjdzie.
@@ -161,18 +227,23 @@ fn run_segmenter(
 
 /// Wysyła gotowy segment do wątku transkrypcji, nie blokując się. Gdy kolejka
 /// jest pełna (transkrypcja nie nadąża) albo odbiorca już zniknął, segment
-/// jest porzucany z komunikatem na stderr — nigdy nie czekamy.
-fn dispatch_segment(segment_tx: &SyncSender<Vec<f32>>, segment: Vec<f32>) {
-    if let Err(err) = segment_tx.try_send(segment) {
-        match err {
-            mpsc::TrySendError::Full(_) => {
-                eprintln!(
-                    "sesja: kolejka transkrypcji pełna — segment porzucony (transkrypcja nie nadąża za mową)"
-                );
-            }
-            mpsc::TrySendError::Disconnected(_) => {
-                eprintln!("sesja: wątek transkrypcji już zakończony — segment porzucony");
-            }
+/// jest porzucany z komunikatem na stderr — nigdy nie czekamy. Zaległość
+/// ([`Backlog`]) rośnie tylko wtedy, gdy segment faktycznie trafił do
+/// kolejki — porzucony segment nigdy w niej nie był, więc jej nie zwiększa.
+fn dispatch_segment<G: Fn(u32)>(
+    segment_tx: &SyncSender<Vec<f32>>,
+    segment: Vec<f32>,
+    backlog: &Backlog<G>,
+) {
+    match segment_tx.try_send(segment) {
+        Ok(()) => backlog.inc(),
+        Err(mpsc::TrySendError::Full(_)) => {
+            eprintln!(
+                "sesja: kolejka transkrypcji pełna — segment porzucony (transkrypcja nie nadąża za mową)"
+            );
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            eprintln!("sesja: wątek transkrypcji już zakończony — segment porzucony");
         }
     }
 }
@@ -185,8 +256,19 @@ fn dispatch_segment(segment_tx: &SyncSender<Vec<f32>>, segment: Vec<f32>) {
 /// whisper na ciszy albo szumie potrafi zmyślić tekst (znaczniki w rodzaju
 /// „[muzyka]", formułki z napisów, samą interpunkcję) — taki tekst jest
 /// odrzucany i tylko logowany, nie wstawiany do dokumentu.
-fn run_transcriber<F>(segment_rx: Receiver<Vec<f32>>, transcriber: &Transcriber, on_segment: F)
-where
+///
+/// Każdy odebrany segment przestaje być zaległością dopiero po zakończeniu
+/// jego obsługi (`backlog.dec()`) — niezależnie od tego, czy trafił do
+/// `on_segment`, czy odpadł w filtrze. Po zakończeniu pętli (kanał
+/// rozłączony i pusty) `backlog.finish()` gwarantuje, że licznik wraca do 0 i
+/// `on_backlog(0)` zostaje wywołane, nawet jeśli sesja nie miała ani jednego
+/// segmentu.
+fn run_transcriber<F, G: Fn(u32)>(
+    segment_rx: Receiver<Vec<f32>>,
+    transcriber: &Transcriber,
+    on_segment: F,
+    backlog: &Backlog<G>,
+) where
     F: Fn(String),
 {
     while let Ok(segment) = segment_rx.recv() {
@@ -206,12 +288,16 @@ where
                 eprintln!("sesja: błąd transkrypcji segmentu: {err:#}");
             }
         }
+        backlog.dec();
     }
+    backlog.finish();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[test]
     fn assembler_sklada_porcje_w_pelne_ramki() {
@@ -270,11 +356,80 @@ mod tests {
     #[test]
     fn dispatch_segment_porzuca_gdy_kolejka_pelna_nie_blokujac() {
         let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(1);
-        dispatch_segment(&tx, vec![1.0]);
+        let backlog = Backlog::new(|_| {});
+        dispatch_segment(&tx, vec![1.0], &backlog);
         // Kolejka ma pojemność 1 i jest teraz pełna — drugie wysłanie musi
         // się nie zablokować, tylko porzucić segment.
-        dispatch_segment(&tx, vec![2.0]);
+        dispatch_segment(&tx, vec![2.0], &backlog);
         assert_eq!(rx.try_recv().unwrap(), vec![1.0]);
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Zwraca `Backlog`, którego `on_change` dopisuje każdą kolejną wartość
+    /// do współdzielonego wektora — pozwala sprawdzić nie tylko stan
+    /// końcowy licznika, ale i historię wywołań callbacku.
+    #[allow(clippy::type_complexity)]
+    fn backlog_z_historia() -> (Backlog<impl Fn(u32)>, Rc<RefCell<Vec<u32>>>) {
+        let history = Rc::new(RefCell::new(Vec::new()));
+        let history_clone = Rc::clone(&history);
+        let backlog = Backlog::new(move |n| history_clone.borrow_mut().push(n));
+        (backlog, history)
+    }
+
+    #[test]
+    fn backlog_rosnie_przy_udanym_wyslaniu_segmentu() {
+        let (tx, _rx) = mpsc::sync_channel::<Vec<f32>>(8);
+        let (backlog, history) = backlog_z_historia();
+
+        dispatch_segment(&tx, vec![1.0], &backlog);
+        dispatch_segment(&tx, vec![2.0], &backlog);
+
+        assert_eq!(backlog.count.load(Ordering::SeqCst), 2);
+        assert_eq!(*history.borrow(), vec![1, 2]);
+    }
+
+    #[test]
+    fn backlog_nie_rosnie_gdy_segment_porzucony_z_pelnej_kolejki() {
+        let (tx, _rx) = mpsc::sync_channel::<Vec<f32>>(1);
+        let (backlog, history) = backlog_z_historia();
+
+        dispatch_segment(&tx, vec![1.0], &backlog); // trafia do kolejki, licznik = 1
+        dispatch_segment(&tx, vec![2.0], &backlog); // kolejka pełna, porzucony
+
+        assert_eq!(backlog.count.load(Ordering::SeqCst), 1);
+        // Callback wołany tylko raz — przy udanym wysłaniu.
+        assert_eq!(*history.borrow(), vec![1]);
+    }
+
+    #[test]
+    fn backlog_maleje_po_zakonczeniu_obslugi_segmentu() {
+        let (backlog, history) = backlog_z_historia();
+
+        backlog.inc();
+        backlog.inc();
+        backlog.dec();
+
+        assert_eq!(backlog.count.load(Ordering::SeqCst), 1);
+        assert_eq!(*history.borrow(), vec![1, 2, 1]);
+    }
+
+    #[test]
+    fn backlog_finish_zeruje_i_zawsze_woła_on_change_z_zerem() {
+        // Przypadek, w którym sesja nie miała ani jednego segmentu — licznik
+        // nigdy się nie zmienił, ale `finish` i tak musi wywołać on_change(0),
+        // żeby okno nie zostało z „przetwarzam" na zawsze.
+        let (backlog, history) = backlog_z_historia();
+        backlog.finish();
+        assert_eq!(backlog.count.load(Ordering::SeqCst), 0);
+        assert_eq!(*history.borrow(), vec![0]);
+
+        // Przypadek typowy: po ostatnim dec() licznik już jest 0, finish()
+        // i tak jawnie to potwierdza.
+        let (backlog2, history2) = backlog_z_historia();
+        backlog2.inc();
+        backlog2.dec();
+        backlog2.finish();
+        assert_eq!(backlog2.count.load(Ordering::SeqCst), 0);
+        assert_eq!(*history2.borrow(), vec![1, 0, 0]);
     }
 }

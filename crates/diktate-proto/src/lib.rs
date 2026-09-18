@@ -18,6 +18,7 @@ pub fn socket_path() -> PathBuf {
 pub const METHOD_SESSION_START: &str = "session.start";
 pub const METHOD_SESSION_STOP: &str = "session.stop";
 pub const NOTIFY_SEGMENT_FINAL: &str = "segment.final";
+pub const NOTIFY_STATE_CHANGED: &str = "state.changed";
 
 /// Wiadomość idąca do daemona.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,12 +100,34 @@ impl Notification {
             params: NotificationParams::SegmentFinal { text: text.into() },
         }
     }
+
+    /// Zmiana stanu sesji. `backlog` to segmenty czekające w kolejce **wraz
+    /// z tym, który jest właśnie transkrybowany** — użytkownik ma wiedzieć,
+    /// ile jego wypowiedzi nie dotarło jeszcze na ekran.
+    pub fn state_changed(state: SessionState, backlog: u32) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            method: NOTIFY_STATE_CHANGED.to_string(),
+            params: NotificationParams::StateChanged { state, backlog },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum NotificationParams {
     SegmentFinal { text: String },
+    StateChanged { state: SessionState, backlog: u32 },
+}
+
+/// Stan sesji widziany przez klienta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionState {
+    /// Sesja nieaktywna — mikrofon wyłączony.
+    Idle,
+    /// Mikrofon zbiera dźwięk; `backlog` mówi, ile czeka na transkrypcję.
+    Recording,
 }
 
 #[cfg(test)]
@@ -123,10 +146,10 @@ mod tests {
     fn outgoing_distinguishes_response_from_notification() {
         let line = serde_json::to_string(&Notification::segment_final("cześć")).unwrap();
         match serde_json::from_str::<Outgoing>(&line).unwrap() {
-            Outgoing::Notification(n) => {
-                let NotificationParams::SegmentFinal { text } = n.params;
-                assert_eq!(text, "cześć");
-            }
+            Outgoing::Notification(n) => match n.params {
+                NotificationParams::SegmentFinal { text } => assert_eq!(text, "cześć"),
+                other => panic!("zły wariant: {other:?}"),
+            },
             Outgoing::Response(_) => panic!("powiadomienie rozpoznane jako odpowiedź"),
         }
 
@@ -134,6 +157,39 @@ mod tests {
         match serde_json::from_str::<Outgoing>(&line).unwrap() {
             Outgoing::Response(r) => assert_eq!(r.id, 7),
             Outgoing::Notification(_) => panic!("odpowiedź rozpoznana jako powiadomienie"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn state_changed_roundtrip() {
+        let line =
+            serde_json::to_string(&Notification::state_changed(SessionState::Recording, 3)).unwrap();
+        assert!(line.contains("\"recording\""));
+        match serde_json::from_str::<Outgoing>(&line).unwrap() {
+            Outgoing::Notification(n) => match n.params {
+                NotificationParams::StateChanged { state, backlog } => {
+                    assert_eq!(state, SessionState::Recording);
+                    assert_eq!(backlog, 3);
+                }
+                other => panic!("zły wariant: {other:?}"),
+            },
+            Outgoing::Response(_) => panic!("rozpoznane jako odpowiedź"),
+        }
+    }
+
+    #[test]
+    fn segment_final_nie_myli_sie_ze_stanem() {
+        let line = serde_json::to_string(&Notification::segment_final("cześć")).unwrap();
+        match serde_json::from_str::<Outgoing>(&line).unwrap() {
+            Outgoing::Notification(n) => {
+                assert!(matches!(n.params, NotificationParams::SegmentFinal { .. }));
+            }
+            Outgoing::Response(_) => panic!("rozpoznane jako odpowiedź"),
         }
     }
 }

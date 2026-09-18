@@ -6,16 +6,26 @@
 use anyhow::{anyhow, Context, Result};
 use async_channel::Receiver;
 use diktate_proto::{
-    socket_path, NotificationParams, Outgoing, Request, METHOD_SESSION_START, METHOD_SESSION_STOP,
+    socket_path, NotificationParams, Outgoing, Request, SessionState, METHOD_SESSION_START,
+    METHOD_SESSION_STOP,
 };
 use std::cell::Cell;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
+/// Wiadomość przerzucona z wątku czytającego gniazdo do pętli GTK.
+///
+/// `Segment` to gotowy tekst wypowiedzi, `State` to zmiana stanu sesji wraz
+/// z liczbą wypowiedzi czekających na transkrypcję.
+pub enum Incoming {
+    Segment(String),
+    State { state: SessionState, backlog: u32 },
+}
+
 pub struct Client {
     writer: std::cell::RefCell<UnixStream>,
     next_id: Cell<u64>,
-    segments: Receiver<String>,
+    incoming: Receiver<Incoming>,
 }
 
 impl Client {
@@ -27,7 +37,7 @@ impl Client {
             .try_clone()
             .context("nie udało się sklonować gniazda")?;
 
-        let (tx, rx) = async_channel::unbounded::<String>();
+        let (tx, rx) = async_channel::unbounded::<Incoming>();
         std::thread::spawn(move || {
             let reader = BufReader::new(reader_stream);
             for line in reader.lines() {
@@ -36,12 +46,18 @@ impl Client {
                     continue;
                 }
                 match serde_json::from_str::<Outgoing>(&line) {
-                    Ok(Outgoing::Notification(notification)) => {
-                        let NotificationParams::SegmentFinal { text } = notification.params;
-                        if tx.send_blocking(text).is_err() {
-                            break;
+                    Ok(Outgoing::Notification(notification)) => match notification.params {
+                        NotificationParams::SegmentFinal { text } => {
+                            if tx.send_blocking(Incoming::Segment(text)).is_err() {
+                                break;
+                            }
                         }
-                    }
+                        NotificationParams::StateChanged { state, backlog } => {
+                            if tx.send_blocking(Incoming::State { state, backlog }).is_err() {
+                                break;
+                            }
+                        }
+                    },
                     // Odpowiedzi na start/stop nie niosą nic poza potwierdzeniem.
                     Ok(Outgoing::Response(_)) => {}
                     Err(err) => eprintln!("diktate-gtk: nieczytelna wiadomość: {err}"),
@@ -52,12 +68,12 @@ impl Client {
         Ok(Self {
             writer: std::cell::RefCell::new(stream),
             next_id: Cell::new(1),
-            segments: rx,
+            incoming: rx,
         })
     }
 
-    pub fn segments(&self) -> Receiver<String> {
-        self.segments.clone()
+    pub fn incoming(&self) -> Receiver<Incoming> {
+        self.incoming.clone()
     }
 
     pub fn start(&self) -> Result<()> {
