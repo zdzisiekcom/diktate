@@ -21,16 +21,13 @@ mod client;
 
 use client::{Client, Incoming};
 use diktate_proto::SessionState;
-use gtk4::glib::SourceId;
 use gtk4::{PolicyType, ScrolledWindow, Spinner, Stack, TextView, ToggleButton, WrapMode};
 use libadwaita::prelude::*;
 use libadwaita::{
     Application, ApplicationWindow, Clamp, HeaderBar, StatusPage, Toast, ToastOverlay,
     ToolbarView, WindowTitle,
 };
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
 
 const APP_ID: &str = "dev.diktate.Gtk";
 
@@ -40,7 +37,6 @@ const PAGE_EMPTY: &str = "empty";
 const PAGE_TEXT: &str = "text";
 
 /// Odstęp między mignięciami ikony mikrofonu w trakcie nagrywania.
-const MIC_PULSE_INTERVAL: Duration = Duration::from_millis(600);
 
 fn main() -> gtk4::glib::ExitCode {
     // Aplikacja libadwaity sama inicjalizuje bibliotekę i podłącza się pod
@@ -99,34 +95,6 @@ fn subtitle_for_state(state: SessionState, backlog: u32) -> String {
         (SessionState::Recording, 0) => "Nagrywam".to_string(),
         (SessionState::Recording, n) => format!("Nagrywam · przetwarzam {}", backlog_phrase(n)),
     }
-}
-
-/// Uruchamia pulsowanie ikony mikrofonu (naprzemienna przezroczystość).
-/// Jeśli jakiś timer już działa, najpierw go zatrzymuje — nigdy nie mamy
-/// dwóch nakładających się animacji na tym samym przycisku.
-fn start_mic_pulse(button: &ToggleButton, pulse_source: &Rc<RefCell<Option<SourceId>>>) {
-    stop_mic_pulse(button, pulse_source);
-
-    let dim = Rc::new(Cell::new(false));
-    let button_for_tick = button.clone();
-    let id = gtk4::glib::timeout_add_local(MIC_PULSE_INTERVAL, move || {
-        let is_dim = dim.get();
-        button_for_tick.set_opacity(if is_dim { 1.0 } else { 0.4 });
-        dim.set(!is_dim);
-        gtk4::glib::ControlFlow::Continue
-    });
-    *pulse_source.borrow_mut() = Some(id);
-}
-
-/// Zatrzymuje pulsowanie i przywraca pełną widoczność ikony. Musi być
-/// wywołana przy każdym przejściu poza stan nagrywania i przy rozłączeniu z
-/// daemonem — bez tego timer tykałby w nieskończoność mimo zakończonej
-/// sesji.
-fn stop_mic_pulse(button: &ToggleButton, pulse_source: &Rc<RefCell<Option<SourceId>>>) {
-    if let Some(id) = pulse_source.borrow_mut().take() {
-        id.remove();
-    }
-    button.set_opacity(1.0);
 }
 
 fn build_ui(app: &Application) {
@@ -230,22 +198,13 @@ fn build_ui(app: &Application) {
     };
 
     if let Some(client) = client {
-        // Timer pulsowania mikrofonu — dzielony między pętlę odbierającą
-        // stan i (pośrednio) zamknięcie okna, żeby zawsze dało się go
-        // jednoznacznie zatrzymać.
-        let mic_pulse_source: Rc<RefCell<Option<SourceId>>> = Rc::new(RefCell::new(None));
-        let previous_state: Rc<Cell<Option<SessionState>>> = Rc::new(Cell::new(None));
-
         // Wiadomości z daemona wpadają tu asynchronicznie: tekst trafia na
-        // koniec bufora, zmiana stanu aktualizuje podtytuł, pulsowanie
-        // ikony i widoczność spinnera zaległości.
+        // koniec bufora, a zmiana stanu aktualizuje podtytuł i widoczność
+        // spinnera zaległości.
         let incoming = client.incoming();
         let buffer_for_incoming = text_view.buffer();
         let window_title_for_incoming = window_title.clone();
-        let record_button_for_incoming = record_button.clone();
         let backlog_spinner_for_incoming = backlog_spinner.clone();
-        let mic_pulse_source_for_incoming = mic_pulse_source.clone();
-        let previous_state_for_incoming = previous_state.clone();
         gtk4::glib::spawn_future_local(async move {
             while let Ok(message) = incoming.recv().await {
                 match message {
@@ -267,32 +226,13 @@ fn build_ui(app: &Application) {
                             backlog_spinner_for_incoming.set_visible(false);
                         }
 
-                        // Pulsowanie mikrofonu reaguje tylko na faktyczne
-                        // przejście stanu, żeby powtarzające się
-                        // powiadomienia „Recording" (np. przy zmianie
-                        // samego backlogu) nie restartowały timera bez
-                        // potrzeby.
-                        if previous_state_for_incoming.get() != Some(state) {
-                            match state {
-                                SessionState::Recording => start_mic_pulse(
-                                    &record_button_for_incoming,
-                                    &mic_pulse_source_for_incoming,
-                                ),
-                                SessionState::Idle => stop_mic_pulse(
-                                    &record_button_for_incoming,
-                                    &mic_pulse_source_for_incoming,
-                                ),
-                            }
-                            previous_state_for_incoming.set(Some(state));
-                        }
                     }
                 }
             }
 
             // Kanał się zamknął — daemon się rozłączył. Zatrzymujemy
-            // pulsowanie i spinner, żeby nic nie kręciło się bez powodu przy
-            // martwym połączeniu.
-            stop_mic_pulse(&record_button_for_incoming, &mic_pulse_source_for_incoming);
+            // spinner, żeby nic nie kręciło się bez powodu przy martwym
+            // połączeniu.
             backlog_spinner_for_incoming.stop();
             backlog_spinner_for_incoming.set_visible(false);
             window_title_for_incoming.set_subtitle("Daemon się rozłączył");
