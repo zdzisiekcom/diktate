@@ -25,14 +25,30 @@ Uporządkowana lista **spanów**. Span wskazuje na fragment segmentu:
 ```rust
 struct Span {
     id: SpanId,          // stabilne, nigdy nie reużywane
-    segment_seq: u64,
-    range: Range<usize>, // zakres znaków w tekście segmentu
+    source: Source,      // z czego pochodzi tekst — niżej
+    range: Range<usize>, // zakres znaków w tekście źródła
 }
 ```
 
 Tekst widoczny w oknie to konkatenacja spanów. Nowy segment = jeden span
 wstawiony **w punkcie wstawiania** (zwykle, ale nie zawsze, na końcu listy —
 patrz [07](07-zachowanie-dyktowania.md#punkt-wstawiania)).
+
+Nie każdy span pochodzi z wypowiedzi: spacja rozdzielająca dokładana przy
+sklejaniu ([07](07-zachowanie-dyktowania.md#sklejanie-z-otoczeniem)) i tekst
+wprowadzony klawiaturą nie mają `segment_seq`. Dlatego span wskazuje na
+**źródło**, którym jest albo wypowiedź, albo tekst dosłowny z magazynu
+dokumentu:
+
+```rust
+enum Source {
+    Segment(u64),   // seq wypowiedzi z logu transkrypcji
+    Literal(usize), // tekst dosłowny: spacja sklejająca, wpis z klawiatury
+}
+```
+
+Oba magazyny są append-only — cofnięcie operacji nie kasuje tego, co
+faktycznie padło ani co zostało napisane.
 
 Edycja **nie zmienia segmentów** — zmienia listę spanów. Zastąpienie
 zaznaczenia to operacja `splice`: wytnij spany pokrywające zaznaczenie (tnąc
@@ -81,11 +97,14 @@ szybsza niż przepustowość GPU) to nie jest przypadek brzegowy, tylko norma.
 Dlatego **pozycje nigdy nie są wyrażane globalnymi offsetami znaków**:
 
 ```rust
-struct Anchor {
-    span: SpanId,
-    offset: usize, // offset znakowy WEWNĄTRZ spanu
+enum Anchor {
+    Start,                              // początek dokumentu
+    In { span: SpanId, offset: usize }, // offset znakowy WEWNĄTRZ spanu
 }
 ```
+
+Wariant `Start` istnieje, bo w pustej notatce nie ma jeszcze żadnego spanu,
+na którym można by zaczepić kotwicę.
 
 `SpanId` jest stabilny i nigdy nie jest reużywany. Dopisanie segmentu na końcu
 dokumentu tworzy nowy span i **nie dotyka żadnej istniejącej kotwicy**.
@@ -97,9 +116,11 @@ wnętrza spanu, który trzeba przeciąć. Cięcie ma jedną regułę:
 > **Lewa połówka zachowuje `SpanId`, prawa dostaje nowy.**
 
 Kotwice o offsecie mniejszym od punktu cięcia pozostają dosłownie takie same.
-Kotwice za punktem cięcia są przeliczane przez `fold` na `(nowy id, offset −
-punkt cięcia)` — przekształcenie deterministyczne i lokalne, wykonywane na
-spanie, którego zaznaczenie i tak nie obejmuje (punkt wstawiania leży poza
+Kotwice za punktem cięcia są przeliczane przy odczycie na `(nowy id, offset −
+punkt cięcia)` — `fold` zostawia po każdym cięciu ślad `stary id → (id prawej
+połówki, punkt cięcia)`, więc kotwica trzymana przez widok od dawna wskazuje
+wciąż ten sam znak zamiast stać się nieważna. To przekształcenie
+deterministyczne i lokalne, wykonywane na spanie, którego zaznaczenie i tak nie obejmuje (punkt wstawiania leży poza
 zaznaczeniem, bo przy uzbrojonym zastąpieniu kotwica wstawiania się nie
 porusza).
 

@@ -506,6 +506,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "diktate-document"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "diktate-gtk"
 version = "0.0.0"
 dependencies = [
