@@ -1,0 +1,11 @@
+[package]
+name = "diktate-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+diktate-core.workspace = true
+hound = "3"

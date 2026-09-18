@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/diktate-proto",
+    "crates/diktate-core",
+    "crates/diktate-daemon",
+    "crates/diktate-cli",
+    "crates/diktate-gtk",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+diktate-proto = { path = "crates/diktate-proto" }
+diktate-core = { path = "crates/diktate-core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

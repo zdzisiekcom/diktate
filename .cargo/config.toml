@@ -1,0 +1,8 @@
+# whisper-rs-sys generuje bindingi do whisper.cpp przez bindgen na podstawie
+# nagłówków systemowej biblioteki C. Na tym systemie bindgen źle wylicza
+# rozmiar niektórych struktur glibc (np. _IO_FILE), co kończy się błędem
+# kompilacji "attempt to compute ... which would overflow" w wygenerowanym
+# bindings.rs. WHISPER_DONT_GENERATE_BINDINGS każe crate'owi użyć gotowych,
+# dołączonych do paczki bindingów zamiast generować je na nowo.
+[env]
+WHISPER_DONT_GENERATE_BINDINGS = "1"

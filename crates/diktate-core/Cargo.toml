@@ -1,0 +1,10 @@
+[package]
+name = "diktate-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cpal = "0.15"
+whisper-rs = "0.14"

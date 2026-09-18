@@ -1,0 +1,12 @@
+[package]
+name = "diktate-gtk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+diktate-proto.workspace = true
+gtk4 = "0.9"
+async-channel = "2"

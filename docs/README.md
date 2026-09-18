@@ -10,6 +10,7 @@ Status: **faza projektowa**. Nie ma jeszcze kodu.
 
 | Dokument | Zawartość |
 |----------|-----------|
+| [00-etap-0.md](00-etap-0.md) | Szkielet przechodzący — najmniejszy działający przekrój |
 | [01-architektura.md](01-architektura.md) | Podział na procesy, wybór technologii, przepływ danych |
 | [02-protokol-ipc.md](02-protokol-ipc.md) | Protokół JSON-RPC między daemonem a klientami |
 | [03-model-dokumentu.md](03-model-dokumentu.md) | Spany, operacje, zastępowanie zaznaczenia głosem |

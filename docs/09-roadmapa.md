@@ -4,9 +4,23 @@ Kolejność wynika z jednej zasady: **każdy etap kończy się czymś, czego da 
 realnie używać**. Nie budujemy infrastruktury pod funkcje, których jeszcze nie
 potrzebujemy.
 
+## Etap 0 — Szkielet przechodzący
+
+Cel: naciskam przycisk w oknie, mówię, naciskam stop — tekst pojawia się
+w oknie.
+
+Najmniejszy pionowy przekrój przez architekturę: `cpal` → whisper (CPU, jeden
+przebieg po nagraniu) → gniazdo uniksowe → `TextView`. Bez VAD, bez modelu
+dokumentu, bez konfiguracji, bez traya. Celem nie jest użyteczność, tylko
+odizolowanie ryzyka sprzętowego zanim cokolwiek zostanie na nim zbudowane.
+Szczegóły i pełna lista pominięć w [00-etap-0.md](00-etap-0.md).
+
 ## Etap 1 — Dyktowanie do schowka
 
 Cel: naciskam skrót, mówię, tekst pojawia się w oknie, kopiuję go.
+
+Rozszerza etap 0: dokłada VAD (przycisk Stop przestaje być potrzebny),
+transkrypcję strumieniową i model dokumentu.
 
 - `diktate-core`: capture (cpal), ring buffer, pre-roll, VAD (Silero), kolejka
   segmentów, whisper-rs z backendem Vulkan, filtry halucynacji
