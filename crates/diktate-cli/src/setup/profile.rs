@@ -93,8 +93,8 @@ const THROUGHPUT_LIMIT_PERCENT: u64 = 85;
 pub fn too_fast_for(rhythm: &Rhythm, run_ms: u32) -> bool {
     let segment_ms =
         rhythm.long_segment_ms + rhythm.silence_ms_to_end_long + SEGMENT_OVERHEAD_MS;
-    let koszt_ms = run_ms as u64 * COST_SHARE_PERCENT / 100;
-    koszt_ms * 100 > segment_ms as u64 * THROUGHPUT_LIMIT_PERCENT
+    let cost_ms = run_ms as u64 * COST_SHARE_PERCENT / 100;
+    cost_ms * 100 > segment_ms as u64 * THROUGHPUT_LIMIT_PERCENT
 }
 
 /// Wygodny skrót dla dialogu: profil ustawiony w całej konfiguracji.

@@ -24,13 +24,13 @@ pub fn changes<T: Serialize>(before: &T, after: &T) -> Result<Vec<Change>> {
     let before = flatten(&toml::Value::try_from(before)?);
     let after = flatten(&toml::Value::try_from(after)?);
     let mut out = Vec::new();
-    for (field, po) in &after {
-        let przed = before.get(field).cloned().unwrap_or_default();
-        if &przed != po {
+    for (field, after_value) in &after {
+        let before_value = before.get(field).cloned().unwrap_or_default();
+        if &before_value != after_value {
             out.push(Change {
                 field: field.clone(),
-                before: przed,
-                after: po.clone(),
+                before: before_value,
+                after: after_value.clone(),
             });
         }
     }
