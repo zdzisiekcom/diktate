@@ -76,7 +76,8 @@ rozplątywanie GTK z rdzenia w momencie, gdy dochodzi trzeci klient.
 - `cmake`, kompilator C++ — whisper.cpp buduje się jako część `whisper-rs`
 - `alsa-devel` (albo odpowiednik pipewire) dla `cpal`
 - `gtk4-devel`, `libadwaita-devel`
-- Model `ggml-base` albo `ggml-small`. Model `tiny` po polsku jest za słaby na
+- Model `ggml-small` (domyślny; `ggml-base` jest szybszy, ale gorzej radzi sobie
+  z polszczyzną). Model `tiny` po polsku jest za słaby na
   dyktowanie — przyda się dopiero jako model czuwania
   ([10](10-wake-word.md)).
 

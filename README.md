@@ -32,16 +32,16 @@ sudo apt-get install libclang-dev libgtk-4-dev libasound2-dev cmake g++
 
 ## Model
 
-Transkrypcja wymaga modelu whisper. Należy pobrać model `ggml-base.bin` do katalogu `~/models/whisper/`:
+Transkrypcja wymaga modelu whisper. Należy pobrać model `ggml-small.bin` do katalogu `~/models/whisper/`:
 
 ```bash
 mkdir -p ~/models/whisper
-curl -L -o ~/models/whisper/ggml-base.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+curl -L -o ~/models/whisper/ggml-small.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 ```
 
 Ścieżka modelu jest ustalana przez zmienną środowiskową `DIKTATE_MODEL` (jeśli ustawiona)
-lub domyślnie szukana w `~/models/whisper/ggml-base.bin`.
+lub domyślnie szukana w `~/models/whisper/ggml-small.bin`.
 
 ## Budowanie
 
@@ -67,7 +67,7 @@ Wynik pojawi się na standardowym wyjściu.
 Dostępne opcje:
 - `--wav FILE`: zamiast nagrywać, wczytaj i ztranskrybuj plik WAV (mono, 16 kHz)
 - `--language LANG`: język transkrypcji (domyślnie `pl`)
-- `--model PATH`: ścieżka do modelu (domyślnie `$DIKTATE_MODEL` lub `~/models/whisper/ggml-base.bin`)
+- `--model PATH`: ścieżka do modelu (domyślnie `$DIKTATE_MODEL` lub `~/models/whisper/ggml-small.bin`)
 
 ### 2. Nagranie z mikrofonu (CLI)
 

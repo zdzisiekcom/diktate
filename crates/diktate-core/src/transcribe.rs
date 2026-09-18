@@ -79,5 +79,5 @@ pub fn default_model_path() -> std::path::PathBuf {
     }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     home.unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("models/whisper/ggml-base.bin")
+        .join("models/whisper/ggml-small.bin")
 }

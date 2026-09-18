@@ -4,7 +4,9 @@
 //! w pamięci w całości i transkrybowane jednym przebiegiem po zatrzymaniu.
 
 pub mod capture;
+pub mod segmenter;
 pub mod transcribe;
+pub mod vad;
 
 /// Częstotliwość, której oczekuje whisper.
 pub const SAMPLE_RATE: u32 = 16_000;

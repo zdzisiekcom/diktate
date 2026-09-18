@@ -8,3 +8,16 @@ license.workspace = true
 anyhow.workspace = true
 cpal = "0.15"
 whisper-rs = "0.14"
+voice_activity_detector = "0.2"
+
+[dev-dependencies]
+hound = "3"
+
+# `ort` (przez voice_activity_detector) domyślnie pobiera onnxruntime w swoim
+# build.rs przez ureq/native-tls/openssl-sys. Na tym systemie brakuje
+# openssl-devel/pkg-config, więc build-dependency openssl-sys się nie buduje.
+# Unifikacja cech w resolverze v2 jest osobna dla build-dependencies, więc
+# samo dodanie openssl-sys do [dependencies] nic nie dawało — musi być tutaj,
+# żeby wymusić wariant "vendored" (budowany ze źródeł, bez nagłówków systemowych).
+[build-dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
