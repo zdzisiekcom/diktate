@@ -1,0 +1,44 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo — lockfile trzymamy w repo (projekt zawiera binarki, nie tylko biblioteki)
+
+# Artefakty budowania whisper.cpp przez whisper-rs
+/whisper.cpp/
+*.o
+*.a
+*.so
+*.dylib
+
+# Modele — pobierane przez `diktate-cli model pull`, po kilka GB
+/models/
+*.bin
+*.gguf
+*.onnx
+*.tflite
+
+# Dane środowiska uruchomieniowego
+/journal/
+*.ndjson
+*.wav
+!testdata/**/*.wav
+
+# Lokalna konfiguracja użytkownika (przykłady trzymamy jako *.toml.example)
+/daemon.toml
+/agent.toml
+/gtk.toml
+
+# Edytory i system
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Narzędzia
+/.direnv/
+/result
+perf.data*
+flamegraph.svg
