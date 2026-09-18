@@ -6,6 +6,7 @@
 //! przechwytywanie, VAD, segmenter i transkrypcję w jedną, trwającą sesję.
 
 pub mod capture;
+pub mod filters;
 pub mod segmenter;
 pub mod session;
 pub mod transcribe;

@@ -29,6 +29,7 @@ use std::thread::JoinHandle;
 use anyhow::{anyhow, Context, Result};
 
 use crate::capture::{Recorder, StreamingRecording};
+use crate::filters;
 use crate::segmenter::{Segmenter, SegmenterConfig};
 use crate::transcribe::Transcriber;
 use crate::vad::{Vad, CHUNK_SAMPLES};
@@ -179,17 +180,28 @@ fn dispatch_segment(segment_tx: &SyncSender<Vec<f32>>, segment: Vec<f32>) {
 /// Ciało wątku transkrypcji: bierze gotowe segmenty i woła `Transcriber`.
 /// Kończy się, gdy `segment_rx` się rozłączy i kolejka jest pusta — czyli
 /// dopiero po tym, jak wątek segmentujący skończył i domknął ostatni segment.
+///
+/// Wynik przechodzi przez [`filters::clean`] zanim trafi do `on_segment`:
+/// whisper na ciszy albo szumie potrafi zmyślić tekst (znaczniki w rodzaju
+/// „[muzyka]", formułki z napisów, samą interpunkcję) — taki tekst jest
+/// odrzucany i tylko logowany, nie wstawiany do dokumentu.
 fn run_transcriber<F>(segment_rx: Receiver<Vec<f32>>, transcriber: &Transcriber, on_segment: F)
 where
     F: Fn(String),
 {
     while let Ok(segment) = segment_rx.recv() {
         match transcriber.transcribe(&segment) {
-            Ok(text) => {
-                if !text.is_empty() {
-                    on_segment(text);
+            Ok(text) => match filters::clean(&text) {
+                Some(cleaned) => on_segment(cleaned),
+                None => {
+                    // Pusty wynik transkrypcji (brak mowy w segmencie) jest
+                    // normalny i nie jest logowany — logujemy tylko, gdy
+                    // filtr faktycznie coś odrzucił.
+                    if !text.trim().is_empty() {
+                        eprintln!("sesja: odrzucono halucynację: {text}");
+                    }
                 }
-            }
+            },
             Err(err) => {
                 eprintln!("sesja: błąd transkrypcji segmentu: {err:#}");
             }

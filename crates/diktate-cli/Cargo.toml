@@ -7,5 +7,17 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
-diktate-core.workspace = true
+# Zależność podana wprost ścieżką (zamiast `diktate-core.workspace = true`),
+# żeby `default-features = false` faktycznie zadziałało — cargo ignoruje tę
+# opcję przy dziedziczeniu z workspace.dependencies, jeśli sam wpis w
+# workspace.dependencies nie deklaruje `default-features`.
+diktate-core = { path = "../diktate-core", default-features = false }
 hound = "3"
+
+# Przekazanie wyboru backendu dalej do diktate-core. Domyślnie CPU — patrz
+# komentarz w crates/diktate-core/Cargo.toml, dlaczego `vulkan` nie jest
+# jeszcze domyślny (błąd w wygenerowanych bindingach whisper-rs-sys na tym
+# systemie). Włączenie: `cargo build -p diktate-cli --features vulkan`.
+[features]
+default = []
+vulkan = ["diktate-core/vulkan"]

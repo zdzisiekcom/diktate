@@ -9,4 +9,16 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 diktate-proto.workspace = true
-diktate-core.workspace = true
+# Zależność podana wprost ścieżką (zamiast `diktate-core.workspace = true`),
+# żeby `default-features = false` faktycznie zadziałało — cargo ignoruje tę
+# opcję przy dziedziczeniu z workspace.dependencies, jeśli sam wpis w
+# workspace.dependencies nie deklaruje `default-features`.
+diktate-core = { path = "../diktate-core", default-features = false }
+
+# Przekazanie wyboru backendu dalej do diktate-core. Domyślnie CPU — patrz
+# komentarz w crates/diktate-core/Cargo.toml, dlaczego `vulkan` nie jest
+# jeszcze domyślny (błąd w wygenerowanych bindingach whisper-rs-sys na tym
+# systemie). Włączenie: `cargo build -p diktate-daemon --features vulkan`.
+[features]
+default = []
+vulkan = ["diktate-core/vulkan"]

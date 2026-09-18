@@ -7,11 +7,26 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 cpal = "0.15"
-whisper-rs = "0.14"
+whisper-rs = { version = "0.14", default-features = false }
 voice_activity_detector = "0.2"
 
 [dev-dependencies]
 hound = "3"
+
+# Backend obliczeniowy whisper.cpp: feature `vulkan` istnieje, ale NIE jest
+# domyślny. Powód: `.cargo/config.toml` w tym repo ustawia
+# WHISPER_DONT_GENERATE_BINDINGS=1 (obejście błędu bindgena z rozmiarami
+# struktur glibc), przez co whisper-rs-sys zawsze używa dołączonego do paczki
+# `src/bindings.rs` zamiast generować bindingi na nowo — a ten plik jest
+# wygenerowany bez cechy `vulkan` i nie zawiera deklaracji
+# `ggml_backend_vk_*`. Efekt: `cargo build --features vulkan` kompiluje samo
+# whisper.cpp z backendem Vulkan (CMake), ale linkowanie z Rustem pada
+# błędem E0432 (unresolved imports w whisper-rs 0.14.4's vulkan.rs). Dopóki
+# ten problem nie zostanie naprawiony wyżej w łańcuchu (whisper-rs-sys /
+# regeneracja bindingów), backendem domyślnym pozostaje CPU.
+[features]
+default = []
+vulkan = ["whisper-rs/vulkan"]
 
 # `ort` (przez voice_activity_detector) domyślnie pobiera onnxruntime w swoim
 # build.rs przez ureq/native-tls/openssl-sys. Na tym systemie brakuje

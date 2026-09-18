@@ -52,6 +52,36 @@ cargo build --workspace
 Zbuduje wszystkie craty projektu (rdzeń, CLI, daemon, interfejs GTK).
 Binarne pliki trafią do `target/debug/`.
 
+### Backend transkrypcji: CPU domyślnie, Vulkan opcjonalnie
+
+`diktate-core` (i przekazujące dalej `diktate-cli`, `diktate-daemon`) ma cechę
+Cargo `vulkan`, która włącza backend GPU whisper.cpp przez `whisper-rs/vulkan`.
+**Domyślnie jest wyłączona** — budowanie idzie na CPU bez dodatkowych flag:
+
+```bash
+cargo build --workspace
+```
+
+Backend Vulkan miał docelowo pokryć jednym kodem zarówno Intel Arc (iGPU, np.
+Meteor Lake), jak i AMD. Próba włączenia:
+
+```bash
+cargo build -p diktate-cli --features vulkan
+```
+
+wymaga w systemie nagłówków Vulkan i kompilatora shaderów (na openSUSE:
+`sudo zypper in vulkan-devel shaderc`) — na tym sprzęcie te pakiety są
+zainstalowane i CMake poprawnie buduje `libggml-vulkan.a` whisper.cpp. Mimo
+to build **obecnie się nie kompiluje**: to repo ma w `.cargo/config.toml`
+ustawione `WHISPER_DONT_GENERATE_BINDINGS=1` (obejście niepowiązanego błędu
+bindgena z rozmiarami struktur glibc), przez co crate `whisper-rs-sys` zawsze
+używa dołączonych do paczki, gotowych bindingów FFI zamiast generować je na
+nowo dla aktywnych cech. Te gotowe bindingi nie zawierają deklaracji
+`ggml_backend_vk_*`, więc `whisper-rs` 0.14.4 (moduł `vulkan.rs`) pada błędem
+`E0432 unresolved imports`. Dopóki to nie zostanie naprawione wyżej w
+łańcuchu (regeneracja bindingów whisper-rs-sys albo poprawka w whisper-rs),
+backendem domyślnym i jedynym używanym w praktyce pozostaje CPU.
+
 ## Uruchamianie
 
 ### 1. Szybki test — transkrypcja pliku WAV
@@ -123,7 +153,9 @@ Brakujące funkcje to między innymi:
 - **Model dokumentu**: brak kotwic, `Ctrl+Z`, zamieniania fragmentów
 - **Konfiguracja**: stałe w kodzie zamiast plików TOML
 - **Tray i skrót globalny**: interfejs okienkowy tylko w oknie, bez integracji z pulpitem
-- **Przyspieszenie GPU** (Vulkan): transkrypcja tylko na CPU
+- **Przyspieszenie GPU** (Vulkan): cecha Cargo `vulkan` istnieje, ale obecnie
+  się nie kompiluje (patrz sekcja „Backend transkrypcji" wyżej) — w praktyce
+  transkrypcja tylko na CPU
 
 ## Test IPC
 
