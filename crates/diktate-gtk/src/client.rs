@@ -17,11 +17,13 @@ use std::os::unix::net::UnixStream;
 ///
 /// `Segment` to gotowa wypowiedź wraz z jej miejscem w osi czasu sesji,
 /// `State` to zmiana stanu sesji wraz z liczbą wypowiedzi czekających na
-/// transkrypcję, `Level` to odczyt poziomu sygnału do wskaźnika.
+/// transkrypcję, `Level` to odczyt poziomu sygnału do wskaźnika. Ze szczytu
+/// (`peak`) okno dziś nie korzysta — wskaźnik rysuje wartość skuteczną, więc
+/// szczyt nie jest tu przenoszony, choć protokół go niesie.
 pub enum Incoming {
     Segment(SegmentAdded),
     State { state: SessionState, backlog: u32 },
-    Level { rms: f32, peak: f32 },
+    Level { rms: f32 },
 }
 
 pub struct Client {
@@ -62,8 +64,8 @@ impl Client {
                                 break;
                             }
                         }
-                        NotificationParams::AudioLevel { rms, peak } => {
-                            if tx.send_blocking(Incoming::Level { rms, peak }).is_err() {
+                        NotificationParams::AudioLevel { rms, .. } => {
+                            if tx.send_blocking(Incoming::Level { rms }).is_err() {
                                 break;
                             }
                         }

@@ -20,19 +20,25 @@
 //! obok tytułu pokazuje się, dopóki jest cokolwiek w kolejce transkrypcji.
 
 mod client;
+mod meter;
 mod shortcut;
+mod tray;
 mod view;
 
 use client::{Client, Incoming};
 use diktate_config::GtkConfig;
 use diktate_proto::SessionState;
-use gtk4::{PolicyType, ScrolledWindow, Spinner, Stack, TextView, ToggleButton, WrapMode};
+use gtk4::{
+    LevelBar, PolicyType, ScrolledWindow, Spinner, Stack, TextView, ToggleButton, WrapMode,
+};
 use libadwaita::prelude::*;
 use libadwaita::{
     Application, ApplicationWindow, Clamp, HeaderBar, StatusPage, Toast, ToastOverlay, ToolbarView,
     WindowTitle,
 };
+use meter::meter_value;
 use std::rc::Rc;
+use tray::{DiktateTray, TrayCommand};
 use view::DocumentView;
 
 const APP_ID: &str = "dev.diktate.Gtk";
@@ -256,8 +262,23 @@ fn build_ui(app: &Application) {
     header.pack_start(&record_button);
     header.pack_end(&copy_button);
 
+    // Wskaźnik poziomu tuż pod paskiem nagłówka: widoczny wyłącznie w trakcie
+    // nagrywania, bo poza nim nie ma czego pokazywać.
+    let level_bar = LevelBar::builder()
+        .min_value(0.0)
+        .max_value(1.0)
+        .visible(false)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(6)
+        .build();
+
     let toolbar_view = ToolbarView::new();
     toolbar_view.add_top_bar(&header);
+    if config.window.show_level_meter {
+        toolbar_view.add_top_bar(&level_bar);
+    }
     toolbar_view.set_content(Some(&toast_overlay));
 
     let window = ApplicationWindow::builder()
@@ -289,6 +310,14 @@ fn build_ui(app: &Application) {
     let client = match Client::connect() {
         Ok(client) => {
             window_title.set_subtitle("Gotowe");
+            // Odczyty poziomu przychodzą tylko na prośbę — to kilkanaście
+            // wiadomości na sekundę i nie ma ich dostawać nikt, kto nie
+            // rysuje wskaźnika.
+            if config.window.show_level_meter {
+                if let Err(err) = client.subscribe_levels() {
+                    eprintln!("diktate-gtk: nie udało się włączyć odczytów poziomu: {err:#}");
+                }
+            }
             Some(Rc::new(client))
         }
         Err(err) => {
@@ -308,6 +337,34 @@ fn build_ui(app: &Application) {
     });
     app.add_action(&toggle_action);
 
+    // Ikona w tray-u rozmawia z oknem kanałem — żyje na własnym wątku
+    // i nie wolno jej dotykać widgetów GTK.
+    let tray_handle = if config.tray.enabled {
+        let (tray_tx, tray_rx) = async_channel::unbounded::<TrayCommand>();
+        let handle = DiktateTray::start(config.tray.show_backlog, tray_tx);
+        if handle.is_some() {
+            let app_for_tray = app.clone();
+            let window_for_tray = window.clone();
+            gtk4::glib::spawn_future_local(async move {
+                while let Ok(command) = tray_rx.recv().await {
+                    match command {
+                        TrayCommand::Present => window_for_tray.present(),
+                        TrayCommand::Toggle => {
+                            window_for_tray.present();
+                            if let Some(action) = app_for_tray.lookup_action(ACTION_TOGGLE) {
+                                action.activate(None);
+                            }
+                        }
+                        TrayCommand::Quit => app_for_tray.quit(),
+                    }
+                }
+            });
+        }
+        handle
+    } else {
+        None
+    };
+
     if let Some(client) = client {
         // Wiadomości z daemona wpadają tu asynchronicznie: tekst trafia na
         // koniec bufora, a zmiana stanu aktualizuje podtytuł i widoczność
@@ -316,17 +373,29 @@ fn build_ui(app: &Application) {
         let document_for_incoming = Rc::clone(&document);
         let window_title_for_incoming = window_title.clone();
         let backlog_spinner_for_incoming = backlog_spinner.clone();
+        let level_bar_for_incoming = level_bar.clone();
+        let tray_for_incoming = tray_handle;
         gtk4::glib::spawn_future_local(async move {
             while let Ok(message) = incoming.recv().await {
                 match message {
                     Incoming::Segment(segment) => {
                         document_for_incoming.insert_segment(&segment);
                     }
-                    // Wskaźnik poziomu jeszcze nie istnieje — odczyty
-                    // pochłaniamy, żeby kanał nie rósł.
-                    Incoming::Level { .. } => {}
+                    Incoming::Level { rms } => {
+                        level_bar_for_incoming.set_value(meter_value(rms));
+                    }
                     Incoming::State { state, backlog } => {
                         window_title_for_incoming.set_subtitle(&subtitle_for_state(state, backlog));
+                        if let Some(handle) = &tray_for_incoming {
+                            handle.update(|tray| {
+                                tray.set_state(state == SessionState::Recording, backlog)
+                            });
+                        }
+                        let nagrywa = state == SessionState::Recording;
+                        level_bar_for_incoming.set_visible(nagrywa);
+                        if !nagrywa {
+                            level_bar_for_incoming.set_value(0.0);
+                        }
 
                         if backlog > 0 {
                             backlog_spinner_for_incoming.set_visible(true);
@@ -344,6 +413,7 @@ fn build_ui(app: &Application) {
             // połączeniu.
             backlog_spinner_for_incoming.stop();
             backlog_spinner_for_incoming.set_visible(false);
+            level_bar_for_incoming.set_visible(false);
             window_title_for_incoming.set_subtitle("Daemon się rozłączył");
         });
 

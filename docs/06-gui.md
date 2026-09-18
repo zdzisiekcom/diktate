@@ -30,6 +30,13 @@ Pełni funkcję diagnostyczną: brak wychyleń natychmiast pokazuje, że wybrane
 urządzenie wejściowe jest nie to, co trzeba — bez tego użytkownik dyktuje
 w ciszę i dowiaduje się o tym po minucie.
 
+Skala jest **decybelowa**, nie liniowa, i to nie jest szczegół kosmetyczny:
+mowa przy normalnym nagrywaniu ma wartość skuteczną rzędu 0,02–0,2, więc
+liniowy pasek stałby cały czas przy lewej krawędzi i nie odróżniałby cichej
+mowy od wyłączonego mikrofonu — czyli nie robiłby tego jednego, do czego
+służy. Dno skali to −60 dBFS. Wskaźnik pokazuje się tylko w trakcie
+nagrywania.
+
 **Segment w przetwarzaniu** pojawia się jako wyszarzony placeholder zaraz po
 `segment.pending`, zanim przyjdzie `segment.added`. Bez tego przy zaległościach
 w kolejce okno wygląda jak zawieszone.
@@ -149,6 +156,13 @@ ale z ostrzeżeniem przy starcie.
 ─────────────────────────────────
   Zakończ
 ```
+
+Dzisiejsze menu ma z tego trzy pozycje: przełączenie dyktowania, „Pokaż
+okno" i „Zakończ". Profile, wybór modelu, historia i ustawienia dochodzą
+razem z etapami, które je wprowadzają — pozycja menu prowadząca donikąd jest
+gorsza od jej braku. Tray żyje na własnym wątku i nie dotyka widgetów: menu
+wysyła polecenie kanałem, a pętla GTK wykonuje je tą samą drogą co
+kliknięcie w oknie.
 
 Ikona zmienia się w trakcie nagrywania (`icon_recording`), a przy zaległościach
 pokazuje licznik, jeśli `tray.show_backlog` jest włączone.
