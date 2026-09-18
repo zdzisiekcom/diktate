@@ -162,8 +162,8 @@ Transkrypcja rozpoczyna się po zatrzymaniu nagrania.
 
 ### 3. Daemon i okno GTK
 
-Etap 0b — interaktywne dyktowanie: daemon nasłuchuje na gnieździe uniksowym,
-okno GTK komunikuje się z daemonem przez IPC.
+Dyktowanie ciągłe: daemon nasłuchuje na gnieździe uniksowym, VAD tnie mowę na
+wypowiedzi, a tekst pojawia się w oknie na bieżąco — bez czekania na Stop.
 
 W pierwszym terminalu uruchom daemon:
 
@@ -177,35 +177,57 @@ W drugim terminalu uruchom interfejs:
 ./target/debug/diktate-gtk
 ```
 
-Okno GTK będzie wyświetlać przycisk „Nagrywaj" (przełączający nagrywanie),
-pole tekstowe na rozpoznany tekst i przycisk „Kopiuj".
-Po zatrzymaniu nagrania (ponowne kliknięcie przycisku) tekst pojawi się w oknie.
+W oknie: przycisk mikrofonu przełącza nagrywanie, wskaźnik pod paskiem
+nagłówka pokazuje poziom sygnału (brak wychyleń = złe urządzenie wejściowe),
+a `Kopiuj` wkłada notatkę do schowka. Tekst wchodzi **w miejsce karetki**, nie
+na koniec — kliknięcie w środek notatki przenosi tam dyktowanie. `Ctrl+Z`
+i `Ctrl+Shift+Z` cofają i ponawiają dyktowanie oraz pisanie jednym
+mechanizmem.
+
+### 4. Skrót globalny
+
+Jeden skrót przywołuje okno i włącza mikrofon:
+
+```bash
+./target/debug/diktate-gtk --install-shortcut "<Control><Alt>d"   # GNOME
+./target/debug/diktate-gtk --remove-shortcut
+```
+
+Poza GNOME zwiąż własnym narzędziem (`sxhkd`, Hyprland, i3, KDE) polecenie
+`diktate-gtk --toggle`.
+
+### 5. Konfiguracja
+
+`~/.config/diktate/daemon.toml` i `~/.config/diktate/gtk.toml`. Brak plików to
+wartości domyślne; literówka w nazwie pola zatrzymuje start z komunikatem.
+Pełna lista pól: [docs/04-konfiguracja.md](docs/04-konfiguracja.md).
 
 ## Crate'y projektu
 
 | Crate | Opis |
 |-------|------|
-| `diktate-core` | Rdzeń: przechwytywanie dźwięku (cpal) i transkrypcja (whisper-rs, domyślnie Vulkan). |
+| `diktate-core` | Rdzeń: przechwytywanie (cpal), VAD (Silero), segmentacja, filtry halucynacji, transkrypcja (whisper-rs, domyślnie Vulkan). |
 | `diktate-proto` | Typy protokołu IPC (JSON-RPC po gnieździe uniksowym). |
-| `diktate-daemon` | Serwer nasłuchujący na gnieździe, wykonujący nagrywanie i transkrypcję. |
+| `diktate-document` | Model notatki: spany, kotwice, log operacji, cofanie. Bez audio, bez GTK. |
+| `diktate-config` | `daemon.toml` i `gtk.toml` — wczytywanie i walidacja. |
+| `diktate-daemon` | Serwer nasłuchujący na gnieździe, prowadzący sesję dyktowania. |
 | `diktate-cli` | Klient terminalowy — komenda `record` do testowania bez interfejsu. |
-| `diktate-gtk` | Interfejs graficzny (GTK 4) — okno dyktowania z przyciskami. |
+| `diktate-gtk` | Interfejs graficzny (GTK 4 + libadwaita): okno, tray, skrót globalny. |
 
 ## Czego jeszcze nie ma
 
-Etap 0 jest szkieletem — wiele funkcji zaplanowanych na kolejne etapy.
-Lista pominięć w etapie 0 oraz plan rozwoju w [docs/09-roadmapa.md](docs/09-roadmapa.md).
+Plan rozwoju: [docs/09-roadmapa.md](docs/09-roadmapa.md).
 
-Brakujące funkcje to między innymi:
-
-- **VAD** (Voice Activity Detection): koniec nagrania wyznacza przycisk Stop
-- **Transkrypcja strumieniowa**: tekst pojawia się podczas nagrania, nie po zatrzymaniu
-- **Filtry halucynacji**: brak post-przetwarzania tekstu
-- **Model dokumentu**: brak kotwic, `Ctrl+Z`, zamieniania fragmentów
-- **Konfiguracja**: stałe w kodzie zamiast plików TOML
-- **Tray i skrót globalny**: interfejs okienkowy tylko w oknie, bez integracji z pulpitem
-- ~~**Przyspieszenie GPU** (Vulkan)~~ — zrobione, patrz sekcja „Backend
-  transkrypcji" wyżej: cecha Cargo `vulkan` jest teraz domyślna
+- **Zastępowanie przez ponowne podyktowanie** (etap 2): zaznaczenie fragmentu
+  nie uzbraja jeszcze zastąpienia; model dokumentu ma pod to fundament
+  (kotwice odporne na napływ wypowiedzi), brakuje operacji `Splice`
+- **Historia notatek** (etap 2): `raw.ndjson`, `ops.ndjson`, `note.md`
+- **Komendy głosowe i aktywacja głosem** (etap 3)
+- **Wpisywanie do aktywnego okna** przez `ydotool` (etap 4)
+- **Redakcja lokalnym LLM-em** (etap 5)
+- **`diktate-cli`**: ma dziś tylko `record`; `toggle`, `status`, `devices`,
+  `config check` dochodzą razem z etapem, który ich potrzebuje
+- **Journal daemona** oraz sekcje `[filters]`, `[log]`, `[ipc]` w konfiguracji
 
 ## Test IPC
 
