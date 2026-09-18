@@ -44,7 +44,7 @@ oraz `docs/04-konfiguracja.md#kreator-diktate-setup` (nadrzędne).
 
 ---
 
-### Zadanie 1: `pidfile` przenosi się do `diktate-proto`
+### Task 1: `pidfile` przenosi się do `diktate-proto`
 
 Kreator musi wykryć działającego daemona, a `pidfile.rs` leży dziś
 w binarce `diktate-daemon`, z której nie da się importować. `diktate-proto`
@@ -107,7 +107,7 @@ git commit -m "refactor(proto): pidfile przenosi się z daemona do proto"
 
 ---
 
-### Zadanie 2: katalog `~/.diktate/models` i domyślna ścieżka modelu
+### Task 2: katalog `~/.diktate/models` i domyślna ścieżka modelu
 
 **Pliki:**
 - Zmień: `crates/diktate-core/src/transcribe.rs:118-125` (`default_model_path`)
@@ -280,7 +280,7 @@ git commit -m "feat(cli): katalog ~/.diktate/models i skan już pobranych modeli
 
 ---
 
-### Zadanie 3: kuratorowany katalog modeli
+### Task 3: kuratorowany katalog modeli
 
 **Pliki:**
 - Utwórz: `crates/diktate-cli/src/model/catalog.rs`
@@ -508,7 +508,7 @@ git commit -m "feat(cli): kuratorowany katalog modeli whispera"
 
 ---
 
-### Zadanie 4: pobieranie z weryfikacją sumy
+### Task 4: pobieranie z weryfikacją sumy
 
 **Pliki:**
 - Utwórz: `crates/diktate-cli/src/model/download.rs`
@@ -785,7 +785,7 @@ git commit -m "feat(cli): pobieranie modeli z wznawianiem i sumą SHA-256"
 
 ---
 
-### Zadanie 5: podkomendy `diktate model list` i `model pull`
+### Task 5: podkomendy `diktate model list` i `model pull`
 
 **Pliki:**
 - Zmień: `crates/diktate-cli/src/main.rs` (nowe warianty `Command`)
@@ -977,7 +977,7 @@ git commit -m "feat(cli): diktate model list i model pull"
 
 ---
 
-### Zadanie 6: profile rytmu, różnice i zapis konfiguracji
+### Task 6: profile rytmu, różnice i zapis konfiguracji
 
 To jądro kreatora bez ani jednego `stdin` — całość da się przetestować.
 
@@ -1476,7 +1476,7 @@ git commit -m "feat(cli): profile rytmu, lista różnic i zapis konfiguracji"
 
 ---
 
-### Zadanie 7: dialog i podkomenda `diktate setup`
+### Task 7: dialog i podkomenda `diktate setup`
 
 **Pliki:**
 - Utwórz: `crates/diktate-cli/src/setup/dialog.rs`
@@ -1942,7 +1942,7 @@ git commit -m "feat(cli): diktate setup — kreator konfiguracji"
 
 ---
 
-### Zadanie 8: domknięcie dokumentacji i sprawdzenie całości
+### Task 8: domknięcie dokumentacji i sprawdzenie całości
 
 Specyfikacja (`docs/01`, `docs/04`, `docs/08`, `docs/09`, `README.md`,
 `CLAUDE.md`) została zaktualizowana **przed** wdrożeniem, w commicie
