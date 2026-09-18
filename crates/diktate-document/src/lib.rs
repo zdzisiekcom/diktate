@@ -82,6 +82,24 @@ impl Anchor {
     }
 }
 
+/// Co warstwa widoku ma zrobić z buforem, żeby dogonić model.
+///
+/// Widok nie przerysowuje całego bufora przy każdej wypowiedzi — zgubiłby
+/// przy tym zaznaczenie, pozycję karetki i przewinięcie. Dostaje więc opis
+/// jednej, lokalnej zmiany. Globalne offsety znakowe występują wyłącznie
+/// tutaj, na granicy z widokiem (`docs/03`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    /// Pozycja znakowa, od której zaczyna się zmiana.
+    pub at: usize,
+    /// Ile znaków usunąć od `at` w lewo (obcięty wielokropek).
+    pub removed: usize,
+    /// Co wstawić w miejsce `at` po usunięciu.
+    pub inserted: String,
+    /// Nowa kotwica wstawiania — tuż za wstawionym tekstem.
+    pub anchor: Anchor,
+}
+
 /// Reguły sklejania wstawianego tekstu z otoczeniem (`docs/07`).
 #[derive(Debug, Clone, Copy)]
 pub struct Normalization {
@@ -233,6 +251,13 @@ impl Document {
         }
     }
 
+    /// Pozycja znakowa kotwicy — jedyne miejsce, w którym globalny offset
+    /// wychodzi na zewnątrz modelu. Warstwa widoku potrzebuje go, bo
+    /// `GtkTextBuffer` innych pozycji nie zna.
+    pub fn char_position(&self, anchor: Anchor) -> usize {
+        self.position_of(anchor)
+    }
+
     /// Znak stojący w tym miejscu; `None` na końcu dokumentu.
     pub fn char_at(&self, anchor: Anchor) -> Option<char> {
         let position = self.position_of(anchor);
@@ -260,25 +285,30 @@ impl Document {
         text: &str,
         at: Anchor,
         normalization: &Normalization,
-    ) -> Anchor {
+    ) -> Change {
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
         self.segments.insert(seq, chars);
 
         let trim_before = self.ellipsis_to_trim(at, normalization);
+        let position = self.position_of(at);
+        let mut inserted = String::new();
         let mut content = Vec::new();
         let mut segment_index = 0;
 
         if self.needs_space_before(at, trim_before, text, normalization) {
             content.push(self.literal_content(" "));
+            inserted.push(' ');
             segment_index = 1;
         }
         content.push(SpanContent {
             source: Source::Segment(seq),
             range: 0..len,
         });
+        inserted.push_str(text);
         if self.needs_space_after(at, text, normalization) {
             content.push(self.literal_content(" "));
+            inserted.push(' ');
         }
 
         let created = self.push_op(Op::Insert {
@@ -286,13 +316,19 @@ impl Document {
             trim_before,
             content,
         });
-        match created.get(segment_index) {
+        let anchor = match created.get(segment_index) {
             Some(&id) => Anchor::In {
                 span: id,
                 offset: len,
             },
             // Pusty segment nie utworzył spanu — kotwica zostaje tam, gdzie była.
             None => at,
+        };
+        Change {
+            at: position - trim_before,
+            removed: trim_before,
+            inserted,
+            anchor,
         }
     }
 

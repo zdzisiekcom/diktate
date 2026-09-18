@@ -8,7 +8,9 @@ use diktate_document::{Anchor, Document, Normalization};
 /// Dokument z jedną wypowiedzią — punkt wyjścia większości testów.
 fn dokument_z(text: &str) -> (Document, Anchor) {
     let mut doc = Document::new();
-    let anchor = doc.insert_segment(0, text, Anchor::Start, &bez_normalizacji());
+    let anchor = doc
+        .insert_segment(0, text, Anchor::Start, &bez_normalizacji())
+        .anchor;
     (doc, anchor)
 }
 
@@ -243,4 +245,49 @@ fn fold_daje_ten_sam_wynik_przy_kazdym_przeliczeniu() {
 
     assert_eq!(doc.text(), tekst);
     assert_eq!(doc.spans(), spany.as_slice());
+}
+
+// --- opis zmiany dla warstwy widoku ---
+
+#[test]
+fn wstawienie_raportuje_dokladnie_to_co_widok_ma_zrobic_z_buforem() {
+    // Widok nie może przerysowywać całego bufora przy każdej wypowiedzi —
+    // zgubiłby zaznaczenie i pozycję karetki. Dostaje więc opis zmiany:
+    // gdzie, ile znaków usunąć i co wstawić.
+    let mut doc = Document::new();
+    doc.insert_segment(0, "Zacząłem mówić…", Anchor::Start, &normalizacja());
+
+    let zmiana = doc.insert_segment(1, "i skończyłem.", doc.end_anchor(), &normalizacja());
+
+    // Wielokropek (1 znak) znika, w jego miejsce wchodzi spacja i tekst.
+    assert_eq!(zmiana.at, "Zacząłem mówić".chars().count());
+    assert_eq!(zmiana.removed, 1);
+    assert_eq!(zmiana.inserted, " i skończyłem.");
+    assert_eq!(doc.text(), "Zacząłem mówić i skończyłem.");
+}
+
+#[test]
+fn kotwica_po_wstawieniu_stoi_tuz_za_wstawionym_tekstem() {
+    let mut doc = Document::new();
+    let zmiana = doc.insert_segment(0, "Ala ma kota.", Anchor::Start, &normalizacja());
+
+    assert_eq!(
+        doc.char_position(zmiana.anchor),
+        "Ala ma kota.".chars().count()
+    );
+}
+
+#[test]
+fn kotwica_po_wstawieniu_w_srodek_stoi_przed_doklejona_spacja() {
+    // Dalszy ciąg dyktowania należy tam, gdzie skończyła się mowa — a nie
+    // za spacją, którą normalizacja dołożyła z tyłu.
+    let mut doc = Document::new();
+    doc.insert_segment(0, "Ala ma kota.", Anchor::Start, &normalizacja());
+    let zmiana = doc.insert_segment(1, "zawsze", doc.anchor_at_char(3).unwrap(), &normalizacja());
+
+    assert_eq!(doc.text(), "Ala zawsze ma kota.");
+    assert_eq!(
+        doc.char_position(zmiana.anchor),
+        "Ala zawsze".chars().count()
+    );
 }

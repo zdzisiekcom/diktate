@@ -1,8 +1,10 @@
 //! Okno dyktowania.
 //!
-//! Etap 0: jedno okno, przycisk przełączający nagrywanie, `TextView` na tekst
-//! i przycisk „Kopiuj". Bez modelu dokumentu — tekst z `segment.final` jest
-//! dopisywany na końcu bufora.
+//! Jedno okno: przycisk przełączający nagrywanie, `TextView` na tekst
+//! i przycisk „Kopiuj". Tekst nie jest dopisywany na koniec bufora, tylko
+//! wstawiany **w kotwicę wstawiania** modelu dokumentu — patrz [`view`]
+//! i `docs/07-zachowanie-dyktowania.md`. Dopisanie na koniec jest tylko
+//! przypadkiem szczególnym tej jednej ścieżki.
 //!
 //! Warstwa widoku zbudowana jest na libadwaicie, żeby okno wyglądało i
 //! zachowywało się jak natywna aplikacja GNOME: pasek nagłówka zintegrowany
@@ -18,8 +20,10 @@
 //! obok tytułu pokazuje się, dopóki jest cokolwiek w kolejce transkrypcji.
 
 mod client;
+mod view;
 
 use client::{Client, Incoming};
+use diktate_document::Normalization;
 use diktate_proto::SessionState;
 use gtk4::{PolicyType, ScrolledWindow, Spinner, Stack, TextView, ToggleButton, WrapMode};
 use libadwaita::prelude::*;
@@ -28,6 +32,7 @@ use libadwaita::{
     WindowTitle,
 };
 use std::rc::Rc;
+use view::DocumentView;
 
 const APP_ID: &str = "dev.diktate.Gtk";
 
@@ -172,6 +177,10 @@ fn build_ui(app: &Application) {
     // Bufor sam decyduje, którą stronę stosu pokazać — obejmuje to zarówno
     // tekst dopisywany z daemona, jak i ręczne usunięcie treści przez
     // użytkownika (wymaganie: powrót do `StatusPage` po wyczyszczeniu).
+    // Model dokumentu podpięty pod bufor. Od tej chwili bufor jest widokiem,
+    // a nie źródłem prawdy.
+    let document = DocumentView::attach(&text_view, Normalization::default());
+
     let buffer = text_view.buffer();
     let stack_for_buffer = stack.clone();
     buffer.connect_changed(move |buffer| {
@@ -200,18 +209,14 @@ fn build_ui(app: &Application) {
         // koniec bufora, a zmiana stanu aktualizuje podtytuł i widoczność
         // spinnera zaległości.
         let incoming = client.incoming();
-        let buffer_for_incoming = text_view.buffer();
+        let document_for_incoming = Rc::clone(&document);
         let window_title_for_incoming = window_title.clone();
         let backlog_spinner_for_incoming = backlog_spinner.clone();
         gtk4::glib::spawn_future_local(async move {
             while let Ok(message) = incoming.recv().await {
                 match message {
                     Incoming::Segment(segment) => {
-                        let mut end = buffer_for_incoming.end_iter();
-                        if buffer_for_incoming.char_count() > 0 {
-                            buffer_for_incoming.insert(&mut end, " ");
-                        }
-                        buffer_for_incoming.insert(&mut end, &segment.text);
+                        document_for_incoming.insert_segment(&segment);
                     }
                     // Wskaźnik poziomu jeszcze nie istnieje — odczyty
                     // pochłaniamy, żeby kanał nie rósł.
@@ -261,17 +266,33 @@ fn build_ui(app: &Application) {
         });
     }
 
-    let buffer_for_copy = text_view.buffer();
+    let document_for_copy = Rc::clone(&document);
     let toast_overlay_for_copy = toast_overlay.clone();
     copy_button.connect_clicked(move |button| {
-        let text = buffer_for_copy.text(
-            &buffer_for_copy.start_iter(),
-            &buffer_for_copy.end_iter(),
-            false,
-        );
-        button.clipboard().set_text(&text);
+        button.clipboard().set_text(&document_for_copy.text());
         toast_overlay_for_copy.add_toast(Toast::new("Skopiowano"));
     });
+
+    // Cofanie i ponawianie obejmuje dyktowanie i pisanie razem — obie drogi
+    // zapisują się w tym samym logu operacji.
+    let shortcuts = gtk4::EventControllerKey::new();
+    let document_for_keys = Rc::clone(&document);
+    shortcuts.connect_key_pressed(move |_, key, _, state| {
+        let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
+        let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+        match key {
+            gtk4::gdk::Key::z if ctrl && !shift => {
+                document_for_keys.undo();
+                gtk4::glib::Propagation::Stop
+            }
+            gtk4::gdk::Key::Z | gtk4::gdk::Key::z if ctrl && shift => {
+                document_for_keys.redo();
+                gtk4::glib::Propagation::Stop
+            }
+            _ => gtk4::glib::Propagation::Proceed,
+        }
+    });
+    window.add_controller(shortcuts);
 
     window.present();
 }
