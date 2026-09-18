@@ -20,6 +20,7 @@
 //! obok tytułu pokazuje się, dopóki jest cokolwiek w kolejce transkrypcji.
 
 mod client;
+mod shortcut;
 mod view;
 
 use client::{Client, Incoming};
@@ -41,14 +42,97 @@ const APP_ID: &str = "dev.diktate.Gtk";
 const PAGE_EMPTY: &str = "empty";
 const PAGE_TEXT: &str = "text";
 
+/// Akcja aplikacji wołana przez skrót globalny: przywołuje okno i przełącza
+/// nagrywanie. Nazwa jest częścią umowy z `--toggle`.
+const ACTION_TOGGLE: &str = "toggle-recording";
+
 fn main() -> gtk4::glib::ExitCode {
+    // Polecenia administracyjne obsługujemy przed uruchomieniem GTK —
+    // rejestracja skrótu nie potrzebuje okna ani serwera wyświetlania.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--install-shortcut") => {
+            let keys = args.get(1).map(String::as_str).unwrap_or(DEFAULT_SHORTCUT);
+            return match shortcut::install(keys) {
+                Ok(()) => gtk4::glib::ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("diktate-gtk: nie udało się zarejestrować skrótu: {err:#}");
+                    gtk4::glib::ExitCode::FAILURE
+                }
+            };
+        }
+        Some("--remove-shortcut") => {
+            return match shortcut::remove() {
+                Ok(()) => gtk4::glib::ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("diktate-gtk: nie udało się usunąć skrótu: {err:#}");
+                    gtk4::glib::ExitCode::FAILURE
+                }
+            };
+        }
+        Some("--help" | "-h") => {
+            print_help();
+            return gtk4::glib::ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
+
     // Aplikacja libadwaity sama inicjalizuje bibliotekę i podłącza się pod
     // `adw::StyleManager` z domyślnym `ColorScheme::Default`, czyli
     // podążaniem za systemowym jasnym/ciemnym motywem — nic tu nie trzeba
     // wymuszać.
-    let app = Application::builder().application_id(APP_ID).build();
-    app.connect_activate(build_ui);
+    //
+    // `HANDLES_COMMAND_LINE` sprawia, że drugie uruchomienie nie tworzy
+    // drugiego okna, tylko przekazuje argumenty do już działającej
+    // instancji. Na tym stoi skrót globalny: `diktate-gtk --toggle`
+    // wywołane z pustego biurka podnosi istniejące okno i włącza mikrofon,
+    // zamiast otwierać kolejną kopię aplikacji.
+    let app = Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk4::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+
+    app.connect_command_line(|app, cmdline| {
+        let toggle = cmdline
+            .arguments()
+            .iter()
+            .any(|arg| arg.to_string_lossy() == "--toggle");
+
+        if app.windows().is_empty() {
+            build_ui(app);
+        }
+        if let Some(window) = app.active_window() {
+            window.present();
+        }
+        if toggle {
+            if let Some(action) = app.lookup_action(ACTION_TOGGLE) {
+                action.activate(None);
+            }
+        }
+        0
+    });
     app.run()
+}
+
+/// Domyślny skrót proponowany przez `--install-shortcut` bez argumentu.
+const DEFAULT_SHORTCUT: &str = "<Control><Alt>d";
+
+fn print_help() {
+    println!(
+        "Diktate — okno dyktowania.
+
+Użycie:
+  diktate-gtk                      otwiera okno
+  diktate-gtk --toggle             przywołuje okno i przełącza nagrywanie
+  diktate-gtk --install-shortcut [SKRÓT]
+                                   rejestruje skrót globalny w GNOME
+                                   (domyślnie {DEFAULT_SHORTCUT})
+  diktate-gtk --remove-shortcut    usuwa zarejestrowany skrót
+  diktate-gtk --help               ten opis
+
+W środowiskach spoza GNOME zwiąż własnym narzędziem polecenie
+`diktate-gtk --toggle`."
+    );
 }
 
 /// Forma liczebnika odpowiadająca polskiej gramatyce dla rzeczowników
@@ -213,6 +297,16 @@ fn build_ui(app: &Application) {
             None
         }
     };
+
+    // Akcja dla skrótu globalnego: przełącza przycisk nagrywania, a cała
+    // reszta (start/stop sesji, podtytuł) dzieje się już tą samą drogą co
+    // przy kliknięciu — jedna ścieżka zamiast dwóch.
+    let toggle_action = gtk4::gio::SimpleAction::new(ACTION_TOGGLE, None);
+    let record_button_for_action = record_button.clone();
+    toggle_action.connect_activate(move |_, _| {
+        record_button_for_action.set_active(!record_button_for_action.is_active());
+    });
+    app.add_action(&toggle_action);
 
     if let Some(client) = client {
         // Wiadomości z daemona wpadają tu asynchronicznie: tekst trafia na

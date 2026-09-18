@@ -165,19 +165,30 @@ kompozytorami.
 **Skrót środowiska wywołujący polecenie** — użytkownik (albo instalator przez
 `gsettings`) rejestruje własny skrót GNOME uruchamiający `diktate-cli toggle`.
 
-Wybrane na start: **`diktate-cli toggle` + skrót w ustawieniach środowiska**.
+Wybrane na start: **skrót środowiska uruchamiający `diktate-gtk --toggle`**.
 Działa dzisiaj, w każdym środowisku, i pozwala związać cokolwiek — `sxhkd`,
 Hyprland, KDE, i3. Portal zostaje dołożony później jako wygoda instalacji, nie
 jako warunek działania.
 
-Instalator oferuje automatyczną rejestrację skrótu `Ctrl+Alt+D` w GNOME:
+Polecenie woła **okno**, a nie `diktate-cli`, bo jeden skrót ma zrobić obie
+rzeczy naraz: przywołać okno na pierwszy plan i włączyć mikrofon. Naciśnięte
+przy pustym biurku otwiera notatkę i od razu nagrywa; naciśnięte ponownie
+kończy dyktowanie. Stoi na tym, że aplikacja jest pojedynczą instancją
+(`HANDLES_COMMAND_LINE`): drugie uruchomienie nie tworzy drugiego okna, tylko
+przekazuje argumenty do już działającego. `diktate-cli toggle` dochodzi
+później dla zastosowań bez okna — jedno nie wyklucza drugiego, bo obie drogi
+kończą się tą samą metodą IPC.
+
+Rejestracja skrótu `Ctrl+Alt+D` w GNOME:
 
 ```bash
-diktate-cli install-shortcut --keys "<Control><Alt>d"
+diktate-gtk --install-shortcut "<Control><Alt>d"   # bez argumentu: Ctrl+Alt+D
+diktate-gtk --remove-shortcut
 ```
 
 Polecenie modyfikuje `org.gnome.settings-daemon.plugins.media-keys
-custom-keybindings` i jest odwracalne przez `--remove`.
+custom-keybindings`. Powtórne wywołanie nadpisuje istniejący wpis, zamiast
+dokładać drugi.
 
 ## Okno ustawień
 
