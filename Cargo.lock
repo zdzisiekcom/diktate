@@ -622,9 +622,12 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "diktate-config",
  "diktate-core",
  "hound",
+ "serde",
  "sha2",
+ "toml 0.8.23",
  "ureq 2.12.1",
 ]
 

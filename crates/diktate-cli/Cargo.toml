@@ -12,6 +12,9 @@ clap = { version = "4", features = ["derive"] }
 # opcję przy dziedziczeniu z workspace.dependencies, jeśli sam wpis w
 # workspace.dependencies nie deklaruje `default-features`.
 diktate-core = { path = "../diktate-core", default-features = false }
+diktate-config.workspace = true
+serde.workspace = true
+toml = "0.8"
 hound = "3"
 # rustls, nie natywne TLS: OpenSSL w tym środowisku nie ma nagłówków
 # (patrz CLAUDE.md, „Pułapki tego środowiska”), a pobranie jednego pliku

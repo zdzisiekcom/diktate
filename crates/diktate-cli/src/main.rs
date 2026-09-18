@@ -4,6 +4,7 @@
 //! bezpośrednio. Służy do sprawdzenia audio i whispera bez GTK i bez IPC.
 
 mod model;
+mod setup;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
