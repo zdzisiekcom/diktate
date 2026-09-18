@@ -182,7 +182,12 @@ nie ma własnej listy pól, bo dwie listy rozjeżdżają się w tygodniach.
 
 Sześć pytań, każde z odpowiedzią domyślną pod Enterem: model, język,
 urządzenie wejściowe (lista z `cpal`, bez nagrywania), rytm segmentacji,
-ikona w zasobniku, skrót globalny. `diktate setup --advanced` przechodzi
+ikona w zasobniku, skrót przełączający nagrywanie **wewnątrz okna**
+(`gtk.toml`, `shortcuts.toggle_recording`). To świadomie nie jest skrót
+naprawdę globalny — ten rejestruje osobno środowisko graficzne poleceniem
+`diktate-gtk --install-shortcut` (patrz README, „Skrót globalny”), bo to
+GNOME/inny kompozytor trzyma globalne powiązania klawiszy, a nie pliki
+Diktate. `diktate setup --advanced` przechodzi
 zamiast tego przez każde pole `daemon.toml` i `gtk.toml` po kolei, z bieżącą
 wartością w nawiasie.
 
@@ -201,7 +206,17 @@ o jeden wybór, a nie o trzy liczby:
 `small-q5_1`, więc kreator oferuje go bez zastrzeżeń tylko przy szybszym
 modelu; przy wolniejszym mówi wprost, że kolejka zacznie rosnąć. Plik
 napisany ręcznie, którego progi nie odpowiadają żadnemu profilowi, kreator
-pokazuje jako „profil własny" i nie podmienia go po cichu.
+pokazuje jako „profil własny" i nie podmienia go po cichu: pytanie „Rytm
+segmentacji?” dostaje wtedy dodatkową, czwartą pozycję na liście — „własny”,
+z bieżącymi trzema progami wypisanymi wprost w opisie — i to ona jest
+odpowiedzią domyślną pod Enterem, więc samo przejście przez kreator niczego
+nie zmienia w rytmie, dopóki ktoś świadomie nie wybierze innej pozycji. Ta
+pozycja pojawia się wyłącznie w krótkiej ścieżce: `--advanced` w ogóle
+pomija pytanie o profil i pyta wprost o `vad.long_segment_ms`,
+`vad.silence_ms_to_end` oraz `vad.silence_ms_to_end_long` jako zwykłe pola
+z dzisiejszą wartością w nawiasie — tam pojęcie „profilu własnego” nie
+istnieje, bo nie ma czego nazywać: nie pada pytanie, z którym miałby się
+różnić.
 
 ### Zapis
 
