@@ -64,21 +64,37 @@ pub fn detect(vad: &VadConfig) -> Option<&'static Rhythm> {
     })
 }
 
+/// Koszt jednego segmentu to około 62% czasu przebiegu mierzonego na 20 s
+/// materiału: dla `small-q5_1` pomiar daje 4,5 s przebiegu i ~2,8 s na
+/// segment (`CLAUDE.md`, „Wydajność transkrypcji”). Whisper liczy zawsze
+/// pełne okno 30 s, więc koszt prawie nie zależy od długości segmentu.
+const COST_SHARE_PERCENT: u64 = 62;
+
+/// O tyle segment jest dłuższy niż sam próg: dochodzi pauza domykająca
+/// i pre-roll. Próg 2500 ms daje w pomiarach segmenty ~3,4 s (`docs/04`).
+const SEGMENT_OVERHEAD_MS: u32 = 700;
+
+/// Granica przepustowości: powyżej niej kolejka rośnie, a tekst pojawia się
+/// później, nie wcześniej.
+const THROUGHPUT_LIMIT_PERCENT: u64 = 85;
+
 /// Czy przy modelu o takim czasie przebiegu ten profil przewróci kolejkę.
 ///
-/// Koszt segmentu jest zdominowany przez enkoder, a whisper zawsze
-/// przetwarza pełne okno — koszt **prawie nie skaluje się** z długością
-/// segmentu (`CLAUDE.md`, „Wydajność transkrypcji"). Dlatego `run_ms`,
-/// zmierzony dla ~20 s mowy, jest już dobrym przybliżeniem kosztu
-/// pojedynczego segmentu, a nie liczbą do przeskalowania przez jego długość.
-/// Kolejka rośnie, gdy ten koszt zbliża się do długości segmentu; próg 85%
-/// odpowiada granicy z `CLAUDE.md` („Dobieranie `long_segment_ms`").
+/// `run_ms` to czas przebiegu na 20 s materiału z katalogu modeli, nie
+/// koszt pojedynczego segmentu — te dwie liczby różnią się (`COST_SHARE_PERCENT`
+/// przelicza jedną w drugą). Rzeczywisty czas trwania segmentu jest też
+/// dłuższy niż sam `long_segment_ms` — dochodzi pauza domykająca i pre-roll
+/// (`SEGMENT_OVERHEAD_MS`). Kolejka rośnie, gdy koszt zbliża się do
+/// rzeczywistej długości segmentu; `THROUGHPUT_LIMIT_PERCENT` to granica
+/// z `CLAUDE.md` („Dobieranie `long_segment_ms`”).
 ///
 /// Na razie wołane tylko przez testy i przyszły dialog kreatora.
 #[allow(dead_code)]
 pub fn too_fast_for(rhythm: &Rhythm, run_ms: u32) -> bool {
-    let segment_ms = rhythm.long_segment_ms + rhythm.silence_ms_to_end_long;
-    run_ms as u64 * 100 > segment_ms as u64 * 85
+    let segment_ms =
+        rhythm.long_segment_ms + rhythm.silence_ms_to_end_long + SEGMENT_OVERHEAD_MS;
+    let koszt_ms = run_ms as u64 * COST_SHARE_PERCENT / 100;
+    koszt_ms * 100 > segment_ms as u64 * THROUGHPUT_LIMIT_PERCENT
 }
 
 /// Wygodny skrót dla dialogu: profil ustawiony w całej konfiguracji.
@@ -132,5 +148,20 @@ mod tests {
         let szybki = &RHYTHMS[0];
         assert!(too_fast_for(szybki, 4_500));
         assert!(!too_fast_for(szybki, 1_200));
+    }
+
+    #[test]
+    fn zalecany_zestaw_nie_budzi_ostrzeżenia() {
+        // small-q5_1 (4,5 s przebiegu na 20 s materiału) z profilem
+        // domyślnym „zrównoważony” to zestaw, który `docs/04` opisuje jako
+        // sprawdzony — kreator nie może ostrzegać przed własnym zaleceniem.
+        assert!(!too_fast_for(&RHYTHMS[1], 4_500));
+    }
+
+    #[test]
+    fn duży_model_ostrzega_nawet_przy_dokładnym_rytmie() {
+        // large-v3-turbo-q5_0 (14–20 s przebiegu na 20 s materiału) jest za
+        // wolny nawet dla najbardziej wyrozumiałego profilu.
+        assert!(too_fast_for(&RHYTHMS[2], 15_500));
     }
 }
