@@ -14,10 +14,11 @@ clap = { version = "4", features = ["derive"] }
 diktate-core = { path = "../diktate-core", default-features = false }
 hound = "3"
 
-# Przekazanie wyboru backendu dalej do diktate-core. Domyślnie CPU — patrz
-# komentarz w crates/diktate-core/Cargo.toml, dlaczego `vulkan` nie jest
-# jeszcze domyślny (błąd w wygenerowanych bindingach whisper-rs-sys na tym
-# systemie). Włączenie: `cargo build -p diktate-cli --features vulkan`.
+# Przekazanie wyboru backendu dalej do diktate-core. Domyślnie Vulkan — patrz
+# komentarz w crates/diktate-core/Cargo.toml. `diktate-core` ma
+# `default-features = false` (patrz wyżej), więc trzeba tu jawnie włączyć
+# `vulkan` domyślnie, żeby faktycznie się propagowało. CPU:
+# `cargo build -p diktate-cli --no-default-features`.
 [features]
-default = []
+default = ["vulkan"]
 vulkan = ["diktate-core/vulkan"]

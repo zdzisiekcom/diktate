@@ -13,19 +13,28 @@ voice_activity_detector = "0.2"
 [dev-dependencies]
 hound = "3"
 
-# Backend obliczeniowy whisper.cpp: feature `vulkan` istnieje, ale NIE jest
-# domyślny. Powód: `.cargo/config.toml` w tym repo ustawia
-# WHISPER_DONT_GENERATE_BINDINGS=1 (obejście błędu bindgena z rozmiarami
-# struktur glibc), przez co whisper-rs-sys zawsze używa dołączonego do paczki
-# `src/bindings.rs` zamiast generować bindingi na nowo — a ten plik jest
-# wygenerowany bez cechy `vulkan` i nie zawiera deklaracji
-# `ggml_backend_vk_*`. Efekt: `cargo build --features vulkan` kompiluje samo
-# whisper.cpp z backendem Vulkan (CMake), ale linkowanie z Rustem pada
-# błędem E0432 (unresolved imports w whisper-rs 0.14.4's vulkan.rs). Dopóki
-# ten problem nie zostanie naprawiony wyżej w łańcuchu (whisper-rs-sys /
-# regeneracja bindingów), backendem domyślnym pozostaje CPU.
+# Backend obliczeniowy whisper.cpp: feature `vulkan` jest domyślna od kiedy
+# na tym sprzęcie (Intel Meteor Lake, iGPU Arc) okazała się wyraźnie
+# szybsza niż CPU (small model, testdata/jfk.wav: Vulkan ok. 3,1 s vs CPU
+# 18,1 s transkrypcji — patrz README). `cargo build --no-default-features`
+# nadal daje czysty build na CPU.
+#
+# Historia problemu (dla przyszłych zmian tego kodu): gotowe bindingi
+# whisper-rs-sys (`src/bindings.rs`, używane bo `.cargo/config.toml` ustawia
+# WHISPER_DONT_GENERATE_BINDINGS=1 — obejście niepowiązanego błędu bindgena
+# z rozmiarami struktur glibc) są generowane bez cechy `vulkan`, więc nie
+# mają deklaracji specyficznych dla Vulkana typu `ggml_backend_vk_*`. Na
+# szczęście CAŁY potrzebny zestaw funkcji (ogólne API rejestru backendów
+# ggml: `ggml_backend_dev_*`, `ggml_backend_reg_*`) już w nich jest — to
+# część rdzenia ggml, nie coś specyficznego dla Vulkana. Jedyną realną
+# przeszkodą był sam whisper-rs 0.14.4: jego `src/vulkan.rs` woła stare,
+# usunięte z bieżącego whisper.cpp symbole `ggml_backend_vk_*`. Naprawiono
+# to lokalną łatką (`[patch.crates-io]` w workspace `Cargo.toml`,
+# `vendor/whisper-rs-0.14.4/src/vulkan.rs`), która odtwarza tę samą
+# funkcjonalność (enumeracja GPU) przez ogólne API rejestru backendów.
+# Whisper-rs-sys NIE jest łatane — bierze się wprost z crates.io.
 [features]
-default = []
+default = ["vulkan"]
 vulkan = ["whisper-rs/vulkan"]
 
 # `ort` (przez voice_activity_detector) domyślnie pobiera onnxruntime w swoim

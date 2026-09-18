@@ -1,8 +1,23 @@
 # whisper-rs-sys generuje bindingi do whisper.cpp przez bindgen na podstawie
 # nagłówków systemowej biblioteki C. Na tym systemie bindgen źle wylicza
-# rozmiar niektórych struktur glibc (np. _IO_FILE), co kończy się błędem
-# kompilacji "attempt to compute ... which would overflow" w wygenerowanym
-# bindings.rs. WHISPER_DONT_GENERATE_BINDINGS każe crate'owi użyć gotowych,
-# dołączonych do paczki bindingów zamiast generować je na nowo.
+# rozmiar niektórych struktur glibc (np. _IO_FILE) i w efekcie także
+# whisper_full_params, co kończy się błędem kompilacji "attempt to compute
+# ... which would overflow" w wygenerowanym bindings.rs (potwierdzony,
+# powtarzalny błąd rozjazdu bindgen/rustc — bindgen 0.71.1 + clang 22 +
+# glibc 2.43 na tym systemie; naprawialny dodaniem `.rust_target(...)` do
+# builder-a bindgena w build.rs whisper-rs-sys, ale to nie zostało tu
+# wprowadzone — patrz niżej, dlaczego nie było potrzebne).
+# WHISPER_DONT_GENERATE_BINDINGS każe crate'owi użyć gotowych, dołączonych do
+# paczki bindingów (src/bindings.rs) zamiast generować je na nowo.
+#
+# Backend Vulkan (cecha Cargo `vulkan`, domyślna od nowszej wersji tego
+# repo) DZIAŁA mimo tego obejścia: dołączone bindingi nie mają wprawdzie
+# deklaracji specyficznych dla Vulkana (`ggml_backend_vk_*`), ale mają cały
+# potrzebny zestaw ogólnego API rejestru backendów ggml
+# (`ggml_backend_dev_*`, `ggml_backend_reg_*`) — to część rdzenia ggml,
+# obecna niezależnie od cech. Osobny problem (whisper-rs 0.14.4's
+# src/vulkan.rs wołające usunięte już symbole `ggml_backend_vk_*`) jest
+# rozwiązany łatką przez [patch.crates-io] w głównym Cargo.toml — patrz
+# vendor/whisper-rs-0.14.4 i sekcja "Backend transkrypcji" w README.md.
 [env]
 WHISPER_DONT_GENERATE_BINDINGS = "1"

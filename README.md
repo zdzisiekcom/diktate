@@ -3,7 +3,8 @@
 Diktate to narzędzie do lokalnej transkrypcji mowy na tekst dla Linuksa, napisane w Rust.
 Projekt jest w fazie bardzo wczesnego rozwoju — zrealizowany jest dopiero **etap 0** (szkielet przechodzący),
 czyli podstawowy prototyp łączący nagranie przez mikrofon, transkrypcję za pomocą whisper.cpp
-na CPU oraz wyświetlenie wyniku w oknie GTK. Nie jest to jeszcze gotowe narzędzie do codziennego użytku.
+(domyślnie na GPU przez Vulkan, opcjonalnie na CPU) oraz wyświetlenie wyniku w oknie GTK.
+Nie jest to jeszcze gotowe narzędzie do codziennego użytku.
 
 Dokumentacja projektowa znajduje się w katalogu [docs/README.md](docs/README.md).
 Szczegóły etapu 0 w pliku [docs/00-etap-0.md](docs/00-etap-0.md).
@@ -52,35 +53,85 @@ cargo build --workspace
 Zbuduje wszystkie craty projektu (rdzeń, CLI, daemon, interfejs GTK).
 Binarne pliki trafią do `target/debug/`.
 
-### Backend transkrypcji: CPU domyślnie, Vulkan opcjonalnie
+### Backend transkrypcji: Vulkan domyślnie, CPU opcjonalnie
 
 `diktate-core` (i przekazujące dalej `diktate-cli`, `diktate-daemon`) ma cechę
 Cargo `vulkan`, która włącza backend GPU whisper.cpp przez `whisper-rs/vulkan`.
-**Domyślnie jest wyłączona** — budowanie idzie na CPU bez dodatkowych flag:
+**Od tej wersji jest domyślnie włączona** — zwykłe budowanie już z niej
+korzysta:
 
 ```bash
 cargo build --workspace
 ```
 
-Backend Vulkan miał docelowo pokryć jednym kodem zarówno Intel Arc (iGPU, np.
-Meteor Lake), jak i AMD. Próba włączenia:
+Backend Vulkan pokrywa jednym kodem zarówno Intel Arc (iGPU, np. Meteor
+Lake), jak i AMD/NVIDIA (przez Vulkan zamiast dedykowanego backendu CUDA).
+Wymaga w systemie nagłówków Vulkan i kompilatora shaderów (na openSUSE:
+`sudo zypper in vulkan-devel shaderc`).
+
+Na tym sprzęcie (Intel Meteor Lake, iGPU Arc) Vulkan daje wyraźne
+przyspieszenie względem CPU. Pomiar na `testdata/jfk.wav`, model `small`,
+`diktate-cli record` (czas zgłoszony przez samą aplikację, bez narzutu
+ładowania modelu i startu procesu):
+
+| Backend | Czas transkrypcji |
+|---------|--------------------|
+| CPU     | 18,1 s             |
+| Vulkan  | 3,1–3,2 s          |
+
+Urządzenie wykryte przez whisper.cpp (stderr): `ggml_vulkan: 0 = Intel(R)
+Graphics (MTL) (Intel open-source Mesa driver)`, `whisper_backend_init_gpu:
+using Vulkan0 backend`.
+
+Backend CPU jest nadal dostępny i w pełni obsługiwany:
 
 ```bash
-cargo build -p diktate-cli --features vulkan
+cargo build --workspace --no-default-features
 ```
 
-wymaga w systemie nagłówków Vulkan i kompilatora shaderów (na openSUSE:
-`sudo zypper in vulkan-devel shaderc`) — na tym sprzęcie te pakiety są
-zainstalowane i CMake poprawnie buduje `libggml-vulkan.a` whisper.cpp. Mimo
-to build **obecnie się nie kompiluje**: to repo ma w `.cargo/config.toml`
-ustawione `WHISPER_DONT_GENERATE_BINDINGS=1` (obejście niepowiązanego błędu
-bindgena z rozmiarami struktur glibc), przez co crate `whisper-rs-sys` zawsze
-używa dołączonych do paczki, gotowych bindingów FFI zamiast generować je na
-nowo dla aktywnych cech. Te gotowe bindingi nie zawierają deklaracji
-`ggml_backend_vk_*`, więc `whisper-rs` 0.14.4 (moduł `vulkan.rs`) pada błędem
-`E0432 unresolved imports`. Dopóki to nie zostanie naprawione wyżej w
-łańcuchu (regeneracja bindingów whisper-rs-sys albo poprawka w whisper-rs),
-backendem domyślnym i jedynym używanym w praktyce pozostaje CPU.
+(albo per-crate: `cargo build -p diktate-cli --no-default-features`).
+
+#### Historia problemu (dla przyszłych zmian tego kodu)
+
+Włączenie cechy `vulkan` wcześniej kończyło się błędem `E0432 unresolved
+imports` w module `vulkan.rs` crate'a `whisper-rs` 0.14.4. Przyczyna:
+`.cargo/config.toml` ustawia `WHISPER_DONT_GENERATE_BINDINGS=1` (obejście
+niepowiązanego błędu bindgena z rozmiarami struktur glibc na tym systemie —
+patrz niżej), więc `whisper-rs-sys` zawsze używa dołączonych do paczki,
+gotowych bindingów FFI (`src/bindings.rs`) zamiast generować je na nowo. Te
+bindingi *nie* zawierają jednak deklaracji specyficznych dla Vulkana
+(`ggml_backend_vk_*`) — ale zawierają cały potrzebny zestaw *ogólnego* API
+rejestru backendów ggml (`ggml_backend_dev_*`, `ggml_backend_reg_*`), bo to
+część rdzenia ggml, nie coś dodawanego tylko przy włączonej cesze `vulkan`.
+Prawdziwym problemem okazał się sam `whisper-rs` 0.14.4: jego `src/vulkan.rs`
+woła stare, specyficzne dla Vulkana symbole (`ggml_backend_vk_get_device_count`
+i pokrewne), których whisper.cpp dołączone do `whisper-rs-sys` 0.13.1 już nie
+eksportuje — ggml przeszło na ogólne API rejestru backendów. To błąd
+niezgodności w samym `whisper-rs` 0.14.4, niezależny od tego systemu
+(wystąpiłby wszędzie z tą wersją whisper.cpp).
+
+Naprawiono to lokalną łatką przez `[patch.crates-io]` w głównym
+`Cargo.toml`, wskazującą na `vendor/whisper-rs-0.14.4` — kopię crate'a z
+przepisanym `src/vulkan.rs`, które odtwarza tę samą funkcjonalność
+(enumerację GPU, `list_devices()`) przez ogólne API rejestru backendów
+zamiast usuniętych symboli `ggml_backend_vk_*`. Publiczne API modułu
+(`VkDeviceInfo`, `VKVram`, `list_devices`) jest niezmienione. `whisper-rs-sys`
+**nie** jest łatane — bierze się wprost z crates.io, bez zmian.
+
+Sprawdzone i odrzucone ścieżki (dla porządku):
+- Podniesienie wersji do `whisper-rs` 0.16.0 / `whisper-rs-sys` 0.15.0: samo
+  bindgenowanie bindingów już wtedy działa (patrz niżej), ale `vulkan.rs`
+  bundled w 0.16.0 ma dokładnie ten sam problem z tymi samymi usuniętymi
+  symbolami — podniesienie wersji samo w sobie nic nie dawało.
+- Regeneracja bindingów przez bindgen z wyłączonym
+  `WHISPER_DONT_GENERATE_BINDINGS` okazała się niepotrzebna: generowanie
+  bindgenem faktycznie pada błędem `E0080` (`attempt to compute 1usize -
+  216usize, which would overflow`) przy wyliczaniu rozmiaru `_IO_FILE` i, w
+  konsekwencji, `whisper_full_params` — to potwierdzony, realny błąd
+  rozjazdu bindgen/rustc na tym systemie (bindgen 0.71.1 + clang 22 + glibc
+  2.43), naprawialny dodaniem `.rust_target(...)` do `build.rs`
+  `whisper-rs-sys` (potwierdzone eksperymentalnie), ale niepotrzebny do
+  odblokowania Vulkana, więc nie wszedł do tej łatki.
 
 ## Uruchamianie
 
@@ -134,7 +185,7 @@ Po zatrzymaniu nagrania (ponowne kliknięcie przycisku) tekst pojawi się w okni
 
 | Crate | Opis |
 |-------|------|
-| `diktate-core` | Rdzeń: przechwytywanie dźwięku (cpal) i transkrypcja (whisper-rs na CPU). |
+| `diktate-core` | Rdzeń: przechwytywanie dźwięku (cpal) i transkrypcja (whisper-rs, domyślnie Vulkan). |
 | `diktate-proto` | Typy protokołu IPC (JSON-RPC po gnieździe uniksowym). |
 | `diktate-daemon` | Serwer nasłuchujący na gnieździe, wykonujący nagrywanie i transkrypcję. |
 | `diktate-cli` | Klient terminalowy — komenda `record` do testowania bez interfejsu. |
@@ -153,9 +204,8 @@ Brakujące funkcje to między innymi:
 - **Model dokumentu**: brak kotwic, `Ctrl+Z`, zamieniania fragmentów
 - **Konfiguracja**: stałe w kodzie zamiast plików TOML
 - **Tray i skrót globalny**: interfejs okienkowy tylko w oknie, bez integracji z pulpitem
-- **Przyspieszenie GPU** (Vulkan): cecha Cargo `vulkan` istnieje, ale obecnie
-  się nie kompiluje (patrz sekcja „Backend transkrypcji" wyżej) — w praktyce
-  transkrypcja tylko na CPU
+- ~~**Przyspieszenie GPU** (Vulkan)~~ — zrobione, patrz sekcja „Backend
+  transkrypcji" wyżej: cecha Cargo `vulkan` jest teraz domyślna
 
 ## Test IPC
 
