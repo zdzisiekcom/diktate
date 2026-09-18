@@ -39,7 +39,12 @@ budują się i działają na maszynie bez serwera wyświetlania.
 | Pakiet DEB | Jak wyżej |
 
 Modele **nie są pakowane** — `large-v3` waży ponad 3 GB. Pobierane przy
-pierwszym uruchomieniu przez `diktate-cli model pull`.
+pierwszym uruchomieniu przez `diktate setup` albo, nieinteraktywnie,
+`diktate model pull <nazwa>`.
+
+`install.sh` kończy podpowiedzią uruchomienia `diktate setup` — to on
+pobiera model i pisze konfigurację, więc instalator nie musi robić ani
+jednego, ani drugiego.
 
 `install.sh` wykonuje: instalację binarek do `~/.local/bin`, plików
 `.desktop` i ikon do `~/.local/share`, przykładowych konfiguracji (bez

@@ -14,6 +14,7 @@ kodu**: jeśli kod robi coś inaczej, to kod jest do poprawy albo dokument do
 | Protokół IPC | `docs/02-protokol-ipc.md` — `diktate-proto` jest jedynym źródłem kształtu wiadomości |
 | Model dokumentu | `docs/03-model-dokumentu.md` |
 | Kolejność prac | `docs/09-roadmapa.md`, `docs/00-etap-0.md` |
+| Kreator setup / pobieranie modeli | `docs/04-konfiguracja.md#kreator-diktate-setup` |
 
 ## Interfejs graficzny — zasada nadrzędna
 
@@ -44,8 +45,11 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-Model whisper: `~/models/whisper/ggml-small.bin`, ścieżkę nadpisuje
-`DIKTATE_MODEL`. Diagnostyka bez mikrofonu:
+Model whisper: `~/.diktate/models/ggml-small-q5_1.bin`, ścieżkę nadpisuje
+`DIKTATE_MODEL`, a przed domyślną wchodzi pole `whisper.model` z `daemon.toml`.
+Modele pobiera `diktate setup` (kreator) albo `diktate model pull <nazwa>`;
+kuratorowana lista modeli żyje w `crates/diktate-cli/src/model/catalog.rs`
+i to ją trzeba uzupełnić, dopisując nowy wariant. Diagnostyka bez mikrofonu:
 
 ```bash
 cargo run -p diktate-core --example segment-wav -- testdata/jfk.wav   # gdzie tnie segmenter

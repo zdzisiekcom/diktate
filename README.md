@@ -31,18 +31,24 @@ Na Debianie/Ubuntu:
 sudo apt-get install libclang-dev libgtk-4-dev libasound2-dev cmake g++
 ```
 
-## Model
+## Model i pierwsza konfiguracja
 
-Transkrypcja wymaga modelu whisper. Należy pobrać model `ggml-small.bin` do katalogu `~/models/whisper/`:
+Najprościej uruchomić kreator — pobiera model i pisze konfigurację:
 
 ```bash
-mkdir -p ~/models/whisper
-curl -L -o ~/models/whisper/ggml-small.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+diktate setup
 ```
 
-Ścieżka modelu jest ustalana przez zmienną środowiskową `DIKTATE_MODEL` (jeśli ustawiona)
-lub domyślnie szukana w `~/models/whisper/ggml-small.bin`.
+Bez dialogu:
+
+```bash
+diktate model list                 # co jest do wyboru i co już masz
+diktate model pull small-q5_1      # pobranie do ~/.diktate/models/
+```
+
+Ścieżka modelu jest ustalana przez zmienną środowiskową `DIKTATE_MODEL`
+(jeśli ustawiona), potem przez pole `whisper.model` w `daemon.toml`,
+a domyślnie to `~/.diktate/models/ggml-small-q5_1.bin`.
 
 ## Budowanie
 
@@ -148,7 +154,7 @@ Wynik pojawi się na standardowym wyjściu.
 Dostępne opcje:
 - `--wav FILE`: zamiast nagrywać, wczytaj i ztranskrybuj plik WAV (mono, 16 kHz)
 - `--language LANG`: język transkrypcji (domyślnie `pl`)
-- `--model PATH`: ścieżka do modelu (domyślnie `$DIKTATE_MODEL` lub `~/models/whisper/ggml-small.bin`)
+- `--model PATH`: ścieżka do modelu (domyślnie `$DIKTATE_MODEL` lub `~/.diktate/models/ggml-small-q5_1.bin`)
 
 ### 2. Nagranie z mikrofonu (CLI)
 
@@ -221,6 +227,10 @@ Poza GNOME zwiąż własnym narzędziem (`sxhkd`, Hyprland, i3, KDE) polecenie
 wartości domyślne; literówka w nazwie pola zatrzymuje start z komunikatem.
 Pełna lista pól: [docs/04-konfiguracja.md](docs/04-konfiguracja.md).
 
+Oba pliki pisze też `diktate setup` — dialog w terminalu, z bieżącymi
+wartościami jako domyślnymi i listą różnic przed zapisem. `diktate setup
+--advanced` pyta o każde pole po kolei.
+
 ## Crate'y projektu
 
 | Crate | Opis |
@@ -230,7 +240,7 @@ Pełna lista pól: [docs/04-konfiguracja.md](docs/04-konfiguracja.md).
 | `diktate-document` | Model notatki: spany, kotwice, log operacji, cofanie. Bez audio, bez GTK. |
 | `diktate-config` | `daemon.toml` i `gtk.toml` — wczytywanie i walidacja. |
 | `diktate-daemon` | Serwer nasłuchujący na gnieździe, prowadzący sesję dyktowania. |
-| `diktate-cli` | Klient terminalowy — komenda `record` do testowania bez interfejsu. |
+| `diktate-cli` | Klient terminalowy — `record` do testowania bez interfejsu, `setup` (kreator konfiguracji) i `model list/pull`. |
 | `diktate-gtk` | Interfejs graficzny (GTK 4 + libadwaita): okno, tray, skrót globalny. |
 
 ## Czego jeszcze nie ma
@@ -244,8 +254,8 @@ Plan rozwoju: [docs/09-roadmapa.md](docs/09-roadmapa.md).
 - **Komendy głosowe i aktywacja głosem** (etap 3)
 - **Wpisywanie do aktywnego okna** przez `ydotool` (etap 4)
 - **Redakcja lokalnym LLM-em** (etap 5)
-- **`diktate-cli`**: ma dziś tylko `record`; `toggle`, `status`, `devices`,
-  `config check` dochodzą razem z etapem, który ich potrzebuje
+- **`diktate-cli`**: ma dziś `record`, `setup` i `model`; `toggle`, `status`,
+  `devices`, `config check` dochodzą razem z etapem, który ich potrzebuje
 - **Journal daemona** oraz sekcje `[filters]`, `[log]`, `[ipc]` w konfiguracji
 
 ## Test IPC

@@ -201,8 +201,12 @@ CPU, ale **jawnie**: ostrzeżenie w logu i w zdarzeniu `state.changed`. Cicha
 degradacja do CPU, gdzie `large-v3` liczy się minutę na segment, byłaby
 najgorszym możliwym zachowaniem.
 
-Modele w `$XDG_DATA_HOME/diktate/models/`, pobierane z HuggingFace przez
-`diktate-cli model pull <nazwa>` z weryfikacją sumy SHA. Zmiana modelu w locie
+Modele w `~/.diktate/models/`, pobierane z HuggingFace przez
+`diktate model pull <nazwa>` z weryfikacją sumy SHA-256. Katalog jest celowo
+poza `$XDG_DATA_HOME`: ścieżka ma być przewidywalna i łatwa do wskazania,
+a wielogigabajtowe wagi nie są danymi, które ktokolwiek chce synchronizować.
+Interaktywnie ten sam pobieracz obsługuje `diktate setup`
+([04-konfiguracja.md](04-konfiguracja.md#kreator-diktate-setup)). Zmiana modelu w locie
 (`model.load`): daemon ładuje nowy, przełącza się po opróżnieniu kolejki,
 zwalnia stary.
 

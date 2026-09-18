@@ -27,7 +27,8 @@ transkrypcję strumieniową i model dokumentu.
 - `diktate-proto` + serwer JSON-RPC na gnieździe uniksowym
 - `diktate-daemon` z journalem
 - `diktate-cli`: `toggle`, `start`, `stop`, `status`, `devices`,
-  `model pull/list`, `config check`
+  `model pull/list`, `setup` (kreator konfiguracji, [04](04-konfiguracja.md#kreator-diktate-setup)),
+  `config check`
 - `diktate-gtk`: okno dyktowania, wskaźnik poziomu, kopiowanie, tray (`ksni`)
 - `diktate-document`: spany, `Insert` w kotwicę wstawiania, `Ctrl+Z`
 - Normalizacja wstawianego tekstu: spacje na stykach, usuwanie końcowego

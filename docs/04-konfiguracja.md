@@ -56,7 +56,8 @@ min_speech_ms = 300           # krótsze odrzucane jako trzask
 max_segment_ms = 15000        # twarde cięcie (okno whispera to 30 s)
 
 [whisper]
-model = ""                    # ścieżka ggml; puste = $DIKTATE_MODEL
+model = ""                    # ścieżka ggml; puste = $DIKTATE_MODEL,
+                              # potem ~/.diktate/models/ggml-small-q5_1.bin
 threads = 0                   # 0 = decyzja whispera
 language = "pl"               # kod ISO albo "auto"
 initial_prompt = ""           # terminologia i nazwy własne
@@ -165,6 +166,77 @@ Sekcja `[wakeword]` powyżej jest opisana w [10-wake-word.md](10-wake-word.md).
 Sekcje `[dictation]`, `[replace]` oraz progi `[vad]` i `[filters]` związane
 z rytmem dyktowania mają uzasadnienie w
 [07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md).
+
+## Kreator `diktate setup`
+
+Pliki TOML zostają jedynym źródłem konfiguracji, ale pierwsze ich napisanie
+nie może być warunkiem wejścia. `diktate setup` prowadzi przez nie dialogiem
+w terminalu i na koniec **zapisuje te same pliki**, które można potem
+edytować ręcznie. Kreator nie jest drugą ścieżką konfiguracji — jest
+generatorem pierwszej.
+
+Kształt pól, wartości domyślne i walidację kreator bierze z `diktate-config`;
+nie ma własnej listy pól, bo dwie listy rozjeżdżają się w tygodniach.
+
+### Krótka ścieżka
+
+Sześć pytań, każde z odpowiedzią domyślną pod Enterem: model, język,
+urządzenie wejściowe (lista z `cpal`, bez nagrywania), rytm segmentacji,
+ikona w zasobniku, skrót globalny. `diktate setup --advanced` przechodzi
+zamiast tego przez każde pole `daemon.toml` i `gtk.toml` po kolei, z bieżącą
+wartością w nawiasie.
+
+### Profile rytmu
+
+Progi VAD w oderwaniu od siebie nie znaczą nic, więc krótka ścieżka pyta
+o jeden wybór, a nie o trzy liczby:
+
+| profil | `long_segment_ms` | `silence_ms_to_end_long` | `silence_ms_to_end` |
+|--------|-------------------|--------------------------|---------------------|
+| szybki | 2000 | 200 | 1200 |
+| zrównoważony (domyślny) | 2500 | 200 | 1500 |
+| dokładny | 4000 | 400 | 2000 |
+
+„Szybki" schodzi poniżej progu przepustowości policzonego wyżej dla
+`small-q5_1`, więc kreator oferuje go bez zastrzeżeń tylko przy szybszym
+modelu; przy wolniejszym mówi wprost, że kolejka zacznie rosnąć. Plik
+napisany ręcznie, którego progi nie odpowiadają żadnemu profilowi, kreator
+pokazuje jako „profil własny" i nie podmienia go po cichu.
+
+### Zapis
+
+Kolejność jest częścią umowy, nie szczegółem implementacji:
+
+1. wczytanie stanu bieżącego (brak pliku to wartości domyślne, nie błąd),
+2. dialog zmienia kopię tego stanu — dlatego domyślne odpowiedzi to
+   wartości **dzisiejsze**, a nie fabryczne,
+3. walidacja wyniku: kreator nie potrafi zapisać pliku, który zablokowałby
+   start daemona,
+4. lista różnic na ekranie (`vad.long_segment_ms: 2500 → 4000`)
+   i potwierdzenie,
+5. kopia `daemon.toml.bak`, potem zapis atomowy (plik tymczasowy obok,
+   `rename`) — jak każdy inny zapis konfiguracji.
+
+Plik po kreatorze zawiera polskie komentarze nad sekcjami i polami, żeby
+nadawał się do dalszej ręcznej edycji. Ręczne komentarze użytkownika **nie
+są** zachowywane: zapis nadpisuje plik w całości, od tego jest `.bak`.
+
+Po zapisie kreator wykrywa działającego daemona (plik PID) i proponuje
+`diktate-daemon --restart`. Bez tego zmiany wyglądałyby, jakby nie działały.
+
+### Modele
+
+`diktate model list` pokazuje kuratorowaną listę modeli z rozmiarem,
+zmierzonym czasem przebiegu i oceną polszczyzny, oznaczając te już obecne na
+dysku; `diktate model pull <nazwa>` pobiera wybrany. Lista jest krótka
+i wkompilowana celowo — pełny spis z API HuggingFace zawiera warianty bez
+sensu na tym sprzęcie, a odpytywanie sieci przy samym wyświetleniu listy
+psuje kreator bez internetu.
+
+Pobieranie idzie do pliku `.part` (wznawialnego nagłówkiem `Range`)
+i dopiero po zgodnej sumie SHA-256 dostaje nazwę docelową. Półpobrany
+`ggml-*.bin` jest gorszy niż jego brak: whisper przewraca się na nim
+komunikatem, który niczego nie tłumaczy.
 
 ## Kolejność rozstrzygania
 
