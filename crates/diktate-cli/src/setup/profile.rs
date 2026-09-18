@@ -8,16 +8,10 @@
 use diktate_config::{DaemonConfig, VadConfig};
 
 pub struct Rhythm {
-    /// Na razie czytane tylko przez testy i przyszły dialog kreatora (to
-    /// zadanie dostarcza jądro bez interfejsu).
-    #[allow(dead_code)]
     pub name: &'static str,
     pub long_segment_ms: u32,
     pub silence_ms_to_end_long: u32,
     pub silence_ms_to_end: u32,
-    /// Na razie wyświetlane tylko przez przyszły dialog kreatora (to
-    /// zadanie dostarcza jądro bez interfejsu).
-    #[allow(dead_code)]
     pub opis: &'static str,
 }
 
@@ -45,9 +39,6 @@ pub const RHYTHMS: &[Rhythm] = &[
     },
 ];
 
-/// Na razie wołane tylko przez testy i przyszły dialog kreatora (to
-/// zadanie dostarcza jądro bez interfejsu).
-#[allow(dead_code)]
 pub fn apply(vad: &mut VadConfig, rhythm: &Rhythm) {
     vad.long_segment_ms = rhythm.long_segment_ms;
     vad.silence_ms_to_end_long = rhythm.silence_ms_to_end_long;
@@ -87,9 +78,6 @@ const THROUGHPUT_LIMIT_PERCENT: u64 = 85;
 /// (`SEGMENT_OVERHEAD_MS`). Kolejka rośnie, gdy koszt zbliża się do
 /// rzeczywistej długości segmentu; `THROUGHPUT_LIMIT_PERCENT` to granica
 /// z `CLAUDE.md` („Dobieranie `long_segment_ms`”).
-///
-/// Na razie wołane tylko przez testy i przyszły dialog kreatora.
-#[allow(dead_code)]
 pub fn too_fast_for(rhythm: &Rhythm, run_ms: u32) -> bool {
     let segment_ms =
         rhythm.long_segment_ms + rhythm.silence_ms_to_end_long + SEGMENT_OVERHEAD_MS;
@@ -98,11 +86,6 @@ pub fn too_fast_for(rhythm: &Rhythm, run_ms: u32) -> bool {
 }
 
 /// Wygodny skrót dla dialogu: profil ustawiony w całej konfiguracji.
-///
-/// Na razie używane tylko przez przyszły dialog kreatora (to zadanie
-/// dostarcza jądro bez interfejsu) — stąd `#[allow(dead_code)]`, tak jak
-/// przy `model::catalog::recommended`.
-#[allow(dead_code)]
 pub fn current(cfg: &DaemonConfig) -> Option<&'static Rhythm> {
     detect(&cfg.vad)
 }

@@ -42,6 +42,12 @@ enum Command {
         #[command(subcommand)]
         action: ModelAction,
     },
+    /// Kreator konfiguracji: model, język, mikrofon, rytm, skróty.
+    Setup {
+        /// Zapytaj o każde pole daemon.toml i gtk.toml, nie tylko o podstawy.
+        #[arg(long)]
+        advanced: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +74,7 @@ fn main() -> Result<()> {
             ModelAction::List => model::cmd::list(),
             ModelAction::Pull { name } => model::cmd::pull(&name).map(|_| ()),
         },
+        Command::Setup { advanced } => setup::run::run(advanced),
     }
 }
 

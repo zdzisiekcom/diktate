@@ -13,6 +13,7 @@ clap = { version = "4", features = ["derive"] }
 # workspace.dependencies nie deklaruje `default-features`.
 diktate-core = { path = "../diktate-core", default-features = false }
 diktate-config.workspace = true
+diktate-proto.workspace = true
 serde.workspace = true
 toml = "0.8"
 hound = "3"

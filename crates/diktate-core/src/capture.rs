@@ -257,6 +257,19 @@ where
 }
 
 /// Miks do mono i zmiana częstotliwości na 16 kHz.
+/// Nazwy urządzeń wejściowych widzianych przez cpal.
+///
+/// Kreator wymienia je przy pytaniu o mikrofon. Brak serwera dźwięku nie
+/// jest tu błędem krytycznym — lista bywa pusta i wtedy pytamy o nazwę
+/// tekstem.
+pub fn input_device_names() -> Result<Vec<String>> {
+    let host = cpal::default_host();
+    let devices = host
+        .input_devices()
+        .context("nie udało się wymienić urządzeń wejściowych")?;
+    Ok(devices.filter_map(|d| d.name().ok()).collect())
+}
+
 fn prepare(captured: Captured) -> Vec<f32> {
     let mono = to_mono(&captured.samples, captured.channels);
     resample(&mono, captured.sample_rate, SAMPLE_RATE)

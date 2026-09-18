@@ -11,9 +11,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use diktate_config::{DaemonConfig, GtkConfig};
 
-/// Na razie wołane tylko przez testy i przyszły dialog kreatora (to
-/// zadanie dostarcza jądro bez interfejsu).
-#[allow(dead_code)]
 pub fn daemon_toml(cfg: &DaemonConfig) -> String {
     let mut out = String::new();
     out.push_str("# daemon.toml — wygenerowane przez `diktate setup`.\n");
@@ -47,8 +44,6 @@ pub fn daemon_toml(cfg: &DaemonConfig) -> String {
     out
 }
 
-/// Na razie wołane tylko przez testy i przyszły dialog kreatora.
-#[allow(dead_code)]
 pub fn gtk_toml(cfg: &GtkConfig) -> String {
     let mut out = String::new();
     out.push_str("# gtk.toml — wygenerowane przez `diktate setup`.\n");
@@ -101,9 +96,6 @@ fn flag(name: &str, value: bool, description: &str) -> String {
 /// Nazwa pliku tymczasowego niesie numer procesu (`std::process::id()`),
 /// żeby dwa równoległe uruchomienia kreatora nie pisały do tej samej
 /// nazwy i nie nadpisały sobie zawartości przed `rename`.
-///
-/// Na razie wołane tylko przez testy i przyszły dialog kreatora.
-#[allow(dead_code)]
 pub fn save(path: &Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)

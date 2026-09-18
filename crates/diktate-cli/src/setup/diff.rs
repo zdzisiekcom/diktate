@@ -7,9 +7,6 @@
 use anyhow::Result;
 use serde::Serialize;
 
-/// Na razie konstruowane tylko przez testy i przyszły dialog kreatora (to
-/// zadanie dostarcza jądro bez interfejsu).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     /// Nazwa z kropką, tak jak w pliku: `vad.long_segment_ms`.
@@ -18,8 +15,6 @@ pub struct Change {
     pub after: String,
 }
 
-/// Na razie wołane tylko przez testy i przyszły dialog kreatora.
-#[allow(dead_code)]
 pub fn changes<T: Serialize>(before: &T, after: &T) -> Result<Vec<Change>> {
     let before = flatten(&toml::Value::try_from(before)?);
     let after = flatten(&toml::Value::try_from(after)?);
