@@ -60,7 +60,26 @@ pub fn download(
     let target = dir.join(model.file);
     let part = dir.join(format!("{}.part", model.file));
 
-    let done = part.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut done = part.metadata().map(|m| m.len()).unwrap_or(0);
+
+    if done > 0 && done >= model.bytes {
+        // `.part` ma już pełną długość — proces padł przed weryfikacją sumy
+        // albo poprzednia próba zostawiła plik o niezgodnej sumie. Prośba
+        // o `Range` od końca pliku dostałaby od serwera 416 i nie ruszyłaby
+        // z miejsca, więc rozstrzygamy na miejscu, bez dotykania sieci.
+        let suma = sha256_file(&part)?;
+        if suma == model.sha256 {
+            progress(done, model.bytes);
+            std::fs::rename(&part, &target)
+                .with_context(|| format!("nie udało się nazwać {}", target.display()))?;
+            return Ok(target);
+        }
+        // Zła suma przy pełnej długości: nie ma z czego dociągać reszty,
+        // bo reszty nie ma — jedyne wyjście to pobranie od zera.
+        std::fs::remove_file(&part)
+            .with_context(|| format!("nie udało się usunąć {}", part.display()))?;
+        done = 0;
+    }
     progress(done, model.bytes);
 
     let mut reader = source.fetch(&model.url(), done)?;
@@ -72,7 +91,6 @@ pub fn download(
         .with_context(|| format!("nie udało się otworzyć {}", part.display()))?;
     file.seek(SeekFrom::Start(done))?;
 
-    let mut done = done;
     let mut buffer = vec![0u8; BUFFER];
     loop {
         let read = reader.read(&mut buffer).context("zerwane pobieranie")?;
@@ -119,7 +137,8 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
-/// Suma z danych w pamięci — używana przez testy katalogu i pobierania.
+/// Suma z danych w pamięci — używana przez testy pobierania do budowania
+/// oczekiwanej sumy modelu bez zapisywania jej ręcznie w każdym teście.
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -134,15 +153,26 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::model::catalog::Polish;
+    use std::cell::Cell;
     use std::io::Cursor;
 
-    /// Źródło z pamięci — testy nie dotykają sieci.
+    /// Źródło z pamięci — testy nie dotykają sieci. Liczy wywołania
+    /// `fetch`, żeby dało się sprawdzić, że sieć w ogóle nie została
+    /// odpytana, gdy `.part` jest już kompletny i zgodny sumą.
     struct Fake {
         data: Vec<u8>,
+        wywołania: Cell<u32>,
+    }
+
+    impl Fake {
+        fn new(data: Vec<u8>) -> Self {
+            Self { data, wywołania: Cell::new(0) }
+        }
     }
 
     impl Source for Fake {
         fn fetch(&self, _url: &str, from: u64) -> Result<Box<dyn Read>> {
+            self.wywołania.set(self.wywołania.get() + 1);
             Ok(Box::new(Cursor::new(self.data[from as usize..].to_vec())))
         }
     }
@@ -173,7 +203,7 @@ mod tests {
         let dir = temp_dir("pelne");
         let m = model(&dane);
 
-        let path = download(&Fake { data: dane.clone() }, &m, &dir, &mut |_, _| {}).unwrap();
+        let path = download(&Fake::new(dane.clone()), &m, &dir, &mut |_, _| {}).unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), dane);
         assert_eq!(path, dir.join("ggml-test.bin"));
@@ -189,7 +219,7 @@ mod tests {
         let m = model(&dane);
 
         let mut pobrano_od = u64::MAX;
-        let path = download(&Fake { data: dane.clone() }, &m, &dir, &mut |done, _| {
+        let path = download(&Fake::new(dane.clone()), &m, &dir, &mut |done, _| {
             pobrano_od = pobrano_od.min(done);
         })
         .unwrap();
@@ -207,7 +237,7 @@ mod tests {
         m.sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
 
         let err = download(
-            &Fake { data: b"prawdziwe dane".to_vec() },
+            &Fake::new(b"prawdziwe dane".to_vec()),
             &m,
             &dir,
             &mut |_, _| {},
@@ -216,5 +246,39 @@ mod tests {
 
         assert!(err.to_string().contains("suma"), "komunikat: {err}");
         assert!(!dir.join("ggml-test.bin").exists());
+    }
+
+    #[test]
+    fn pełny_part_o_dobrej_sumie_nie_pobiera_ponownie() {
+        // Proces mógł paść tuż po dociągnięciu ostatniego bajtu, przed
+        // liczeniem sumy. Dane są już kompletne i poprawne — nie ma po co
+        // pytać serwera o cokolwiek, samo domknięcie nazwą wystarczy.
+        let dane = b"model udajacy wagi".to_vec();
+        let dir = temp_dir("pelny-part-dobra-suma");
+        std::fs::write(dir.join("ggml-test.bin.part"), &dane).unwrap();
+        let m = model(&dane);
+        let source = Fake::new(dane.clone());
+
+        let path = download(&source, &m, &dir, &mut |_, _| {}).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), dane);
+        assert_eq!(path, dir.join("ggml-test.bin"));
+        assert_eq!(source.wywołania.get(), 0, "sieć została odpytana mimo kompletnego .part");
+    }
+
+    #[test]
+    fn pełny_part_o_złej_sumie_pobiera_od_zera() {
+        // Plik `.part` ma już docelową długość, ale to nie te bajty (np.
+        // poprzednia próba trafiła na uszkodzony transfer). Dociąganie od
+        // końca nie ma sensu — jedyna droga to pobranie całości od nowa.
+        let dane = b"model udajacy wagi".to_vec();
+        let dir = temp_dir("pelny-part-zla-suma");
+        let smieci = vec![0xAAu8; dane.len()];
+        std::fs::write(dir.join("ggml-test.bin.part"), &smieci).unwrap();
+        let m = model(&dane);
+
+        let path = download(&Fake::new(dane.clone()), &m, &dir, &mut |_, _| {}).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), dane);
     }
 }
