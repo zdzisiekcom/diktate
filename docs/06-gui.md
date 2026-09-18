@@ -63,7 +63,7 @@ zaznaczenie. Pełna semantyka: [07](07-zachowanie-dyktowania.md#zaznaczenie-i-za
 | Skrót | Akcja |
 |-------|-------|
 | `Ctrl+C` | Kopiuj całość do schowka |
-| `Ctrl+Enter` | Kopiuj i zamknij |
+| `Super+C` | Kopiuj i zamknij (przycisk „OK”) |
 | `Ctrl+R` | Podyktuj ponownie zaznaczony fragment (jawne uzbrojenie; przy `implicit_replace` wystarczy zaznaczenie) |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Cofnij / ponów |
 | `Ctrl+S` | Zapisz do historii |
@@ -71,6 +71,33 @@ zaznaczenie. Pełna semantyka: [07](07-zachowanie-dyktowania.md#zaznaczenie-i-za
 | `Escape` | Anuluj tryb zastępowania; ponownie — odrzuć i zamknij |
 
 Wszystkie konfigurowalne w `gtk.toml`, sekcja `[shortcuts]`.
+
+### „OK” — jedno domknięcie dyktowania
+
+Zwykły przebieg to trzy ruchy: skrót globalny podnosi okno i włącza mikrofon,
+użytkownik dyktuje, skrót `Super+C` domyka. Domknięcie robi wszystko naraz —
+zatrzymuje nagrywanie, wkłada cały tekst do schowka i zamyka okno — więc
+wklejenie w docelowej aplikacji jest następnym ruchem, a nie czwartym.
+
+`Super+C` jest skrótem **lokalnym**: działa, gdy okno ma ognisko, i nie zabiera
+kombinacji reszcie systemu. Globalny jest tylko ten jeden od nagrywania.
+
+**Domknięcie czeka na ostatnie zdanie.** Skrót pada zwykle ułamek sekundy po
+tym, jak użytkownik skończył mówić — a ostatnia wypowiedź jest wtedy jeszcze
+w transkrypcji. Kopiowanie w tym momencie oddałoby schowkowi tekst bez
+ostatniego zdania, czyli dokładnie to, czego nikt nie zauważy przed wklejeniem.
+Żądanie jest więc **odkładane** tak samo jak żądanie nagrywania z pustego
+biurka i wykonywane dopiero z powiadomienia `state.changed`, w którym sesja
+jest bezczynna, a `backlog` zszedł do zera. Podtytuł przez ten czas mówi
+„Przetwarzam N wypowiedzi…”, więc widać, na co okno czeka.
+
+Powrót do mikrofonu (przycisk albo skrót globalny) **odwołuje** odłożone
+domknięcie — inaczej okno zamykałoby się w środku następnego dyktowania.
+Rozłączenie daemona domyka natychmiast tym, co zdążyło dojść: nie ma już kto
+dosłać reszty, a wiszące okno byłoby gorsze od niepełnego schowka.
+
+Daemon **zostaje** po zamknięciu okna. Kolejne naciśnięcie skrótu globalnego
+podnosi okno na nowo bez czekania na wczytanie modelu.
 
 Przycisk „Podyktuj ponownie" jest aktywny tylko przy niepustym zaznaczeniu
 i przy `implicit_replace = true` pełni funkcję informacyjną — pokazuje, że
@@ -204,6 +231,24 @@ Polecenie modyfikuje `org.gnome.settings-daemon.plugins.media-keys
 custom-keybindings`. Powtórne wywołanie nadpisuje istniejący wpis, zamiast
 dokładać drugi.
 
+### Skrót z pustego biurka uruchamia całą drogę
+
+Skrót potrafi wystartować aplikację od zera: akcja `toggle-recording` odpala
+się wtedy, zanim daemon odpowie, a bywa że przed jego uruchomieniem.
+Przełączenie wtedy samego przycisku dawało stan pozorny — przycisk wyglądał
+na wciśnięty, `session.start` nigdy nie szedł, a nagrywanie wymagało dwóch
+naciśnięć.
+
+Żądanie, które przyszło przed połączeniem, jest więc **odkładane** i wykonywane
+po połączeniu — tą samą drogą co kliknięcie przycisku, czyli razem z ikoną
+nagrywania, wskaźnikiem poziomu i podtytułem ze stanu sesji. Drugie naciśnięcie
+w trakcie czekania odwołuje pierwsze, tak jak drugie kliknięcie. Podtytuł przez
+ten czas mówi „Uruchamiam daemona — zaraz zacznę nagrywać…", a spinner obok
+tytułu się kręci, więc widać, że żądanie nie przepadło.
+
+Gdy połączenie się nie powiodło albo padło, odłożone żądanie **przepada** —
+okno nie obiecuje nagrania, którego nie będzie.
+
 ## Okno ustawień
 
 Na tym etapie **celowo minimalne**. Konfiguracja odbywa się w plikach TOML
@@ -219,6 +264,33 @@ Które opcje przenieść do GUI na stałe, zdecydujemy po okresie używania
 aplikacji. Wcześniejsze budowanie pełnego panelu ustawień oznaczałoby
 utrzymywanie dwóch ścieżek konfiguracji dla opcji, które być może nigdy nie
 zostaną dotknięte po pierwszym strojeniu.
+
+## Uruchamianie daemona przez klienta
+
+Wymaganie: użytkownik nie ma pamiętać o daemonie. Diktate jest dla niego
+jedną aplikacją, a nie usługą plus okno.
+
+Klient, który nie zastał gniazda, **uruchamia daemona sam** i ponawia próbę
+połączenia z narastającym odstępem, aż gniazdo się pojawi (domyślnie do
+30 sekund — tyle, ile potrafi trwać wczytanie modelu whispera, bo daemon
+otwiera gniazdo dopiero po nim). Podtytuł mówi kolejno „Łączę z daemonem…",
+„Uruchamiam daemona…" i wreszcie „Gotowe"; przycisk nagrywania jest
+nieaktywny, dopóki nie ma z kim rozmawiać.
+
+Łączenie idzie **osobnym wątkiem**: okno jest widoczne i odpowiada od
+pierwszej chwili, a nie zastyga na czas wczytywania modelu.
+
+Uruchomiony daemon dostaje własną grupę procesów i **przeżywa zamknięcie
+okna** — kolejne uruchomienie klienta zastaje gotowe gniazdo i wczytany
+model, czyli dyktowanie od razu, bez kilkunastosekundowej przerwy.
+
+Plik wykonywalny wybierany jest w kolejności: `$DIKTATE_DAEMON`, katalog
+obok klienta (`target/debug/diktate-gtk` uruchamia `target/debug/diktate-daemon`,
+nie wersję z systemu), na końcu `PATH`.
+
+Wyłączenie tego zachowania to `autostart = false` w `[daemon]` w `gtk.toml`
+([04-konfiguracja.md](04-konfiguracja.md)) — sensowne tam, gdzie daemon
+chodzi pod `systemd --user`.
 
 ## Zachowanie przy rozłączeniu daemona
 

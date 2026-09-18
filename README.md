@@ -165,16 +165,24 @@ Transkrypcja rozpoczyna się po zatrzymaniu nagrania.
 Dyktowanie ciągłe: daemon nasłuchuje na gnieździe uniksowym, VAD tnie mowę na
 wypowiedzi, a tekst pojawia się w oknie na bieżąco — bez czekania na Stop.
 
-W pierwszym terminalu uruchom daemon:
-
-```bash
-./target/debug/diktate-daemon
-```
-
-W drugim terminalu uruchom interfejs:
+Wystarczy uruchomić okno:
 
 ```bash
 ./target/debug/diktate-gtk
+```
+
+Jeśli daemon nie działa, klient **uruchomi go sam** (szuka go kolejno w
+`$DIKTATE_DAEMON`, w katalogu obok siebie i w `PATH`) i poczeka na gniazdo —
+podtytuł pokazuje „Uruchamiam daemona…", a przycisk mikrofonu budzi się
+z połączeniem. Uruchomiony w ten sposób daemon zostaje po zamknięciu okna,
+więc następne uruchomienie ma model już wczytany. Wyłącza to `autostart =
+false` w sekcji `[daemon]` pliku `gtk.toml`.
+
+Daemon można też prowadzić ręcznie w osobnym terminalu — wtedy klient po
+prostu zastaje gotowe gniazdo:
+
+```bash
+./target/debug/diktate-daemon
 ```
 
 W oknie: przycisk mikrofonu przełącza nagrywanie, wskaźnik pod paskiem

@@ -32,6 +32,9 @@ pub enum TrayCommand {
 const ICON_IDLE: &str = "audio-input-microphone-symbolic";
 const ICON_RECORDING: &str = "media-record-symbolic";
 
+/// Uchwyt do ikony w tray-u — tym rozmawia z nią okno.
+pub type TrayHandle = Handle<DiktateTray>;
+
 pub struct DiktateTray {
     recording: bool,
     backlog: u32,

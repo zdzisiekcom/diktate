@@ -207,9 +207,35 @@ const WHISPER_WINDOW_MS: u32 = 30_000;
 #[serde(deny_unknown_fields, default)]
 pub struct GtkConfig {
     pub window: WindowConfig,
+    pub daemon: GtkDaemonConfig,
     pub dictation: DictationConfig,
     pub shortcuts: ShortcutsConfig,
     pub tray: TrayConfig,
+}
+
+/// Co klient GUI robi, gdy daemon nie działa.
+///
+/// Domyślnie uruchamia go sam: z punktu widzenia użytkownika Diktate jest
+/// jedną aplikacją, a nie usługą, którą trzeba pamiętać, żeby włączyć.
+/// Wyłączenie `autostart` zostawia decyzję systemowi — sensowne tam, gdzie
+/// daemon chodzi z `systemd --user`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GtkDaemonConfig {
+    pub autostart: bool,
+    /// Ile czekać na gniazdo po uruchomieniu daemona. Czas liczy się od
+    /// startu procesu i musi pomieścić wczytanie modelu whispera — to
+    /// sekundy, nie milisekundy.
+    pub start_timeout_ms: u64,
+}
+
+impl Default for GtkDaemonConfig {
+    fn default() -> Self {
+        Self {
+            autostart: true,
+            start_timeout_ms: 30_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

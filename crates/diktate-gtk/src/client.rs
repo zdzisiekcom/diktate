@@ -12,6 +12,9 @@ use diktate_proto::{
 use std::cell::Cell;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
+
+use crate::daemon;
 
 /// Wiadomość przerzucona z wątku czytającego gniazdo do pętli GTK.
 ///
@@ -82,6 +85,46 @@ impl Client {
             next_id: Cell::new(1),
             incoming: rx,
         })
+    }
+
+    /// Łączy się z daemonem, a gdy ten nie działa — uruchamia go i czeka na
+    /// gniazdo.
+    ///
+    /// Pierwsza próba idzie bez zwłoki: w typowym przypadku daemon już
+    /// nasłuchuje i nic tu nie kosztuje. Dopiero jej niepowodzenie oznacza
+    /// brak procesu; wtedy wołane jest `on_spawn` (okno ma powiedzieć, że
+    /// czeka na start), a kolejne próby ponawiają się z narastającym
+    /// odstępem aż do `timeout`. Czas musi pomieścić wczytanie modelu
+    /// whispera, bo daemon otwiera gniazdo dopiero po nim.
+    ///
+    /// Wywoływana z osobnego wątku — czekanie blokuje, a pętla GTK nie ma
+    /// prawa stanąć.
+    pub fn connect_or_spawn(timeout: Duration, on_spawn: impl FnOnce()) -> Result<Self> {
+        if let Ok(client) = Self::connect() {
+            return Ok(client);
+        }
+
+        on_spawn();
+        let pid = daemon::spawn()?;
+        eprintln!("diktate-gtk: uruchomiłem daemona (pid {pid})");
+
+        let deadline = Instant::now() + timeout;
+        let mut delay = Duration::from_millis(50);
+        loop {
+            std::thread::sleep(delay);
+            match Self::connect() {
+                Ok(client) => return Ok(client),
+                Err(err) => {
+                    if Instant::now() >= deadline {
+                        return Err(err.context(format!(
+                            "daemon (pid {pid}) nie otworzył gniazda w ciągu {} s",
+                            timeout.as_secs_f32()
+                        )));
+                    }
+                }
+            }
+            delay = (delay * 2).min(Duration::from_millis(500));
+        }
     }
 
     pub fn incoming(&self) -> Receiver<Incoming> {

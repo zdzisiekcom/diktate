@@ -1,7 +1,11 @@
 //! Okno dyktowania.
 //!
 //! Jedno okno: przycisk przełączający nagrywanie, `TextView` na tekst
-//! i przycisk „Kopiuj". Tekst nie jest dopisywany na koniec bufora, tylko
+//! oraz dwa przyciski wyjścia — „Kopiuj" i „OK". „OK" (skrót lokalny
+//! `Super+C`) domyka dyktowanie jednym ruchem: zatrzymuje nagrywanie,
+//! kopiuje całość do schowka i zamyka okno — ale dopiero, gdy kolejka
+//! transkrypcji ucichnie, żeby nie zjeść ostatniego zdania; patrz
+//! [`Accept`]. Tekst nie jest dopisywany na koniec bufora, tylko
 //! wstawiany **w kotwicę wstawiania** modelu dokumentu — patrz [`view`]
 //! i `docs/07-zachowanie-dyktowania.md`. Dopisanie na koniec jest tylko
 //! przypadkiem szczególnym tej jednej ścieżki.
@@ -20,6 +24,7 @@
 //! obok tytułu pokazuje się, dopóki jest cokolwiek w kolejce transkrypcji.
 
 mod client;
+mod daemon;
 mod meter;
 mod shortcut;
 mod tray;
@@ -37,8 +42,9 @@ use libadwaita::{
     WindowTitle,
 };
 use meter::meter_value;
+use std::cell::Cell;
 use std::rc::Rc;
-use tray::{DiktateTray, TrayCommand};
+use tray::{DiktateTray, TrayCommand, TrayHandle};
 use view::DocumentView;
 
 const APP_ID: &str = "dev.diktate.Gtk";
@@ -51,6 +57,13 @@ const PAGE_TEXT: &str = "text";
 /// Akcja aplikacji wołana przez skrót globalny: przywołuje okno i przełącza
 /// nagrywanie. Nazwa jest częścią umowy z `--toggle`.
 const ACTION_TOGGLE: &str = "toggle-recording";
+
+/// Akcja domykająca dyktowanie: kopiuje tekst do schowka, zatrzymuje
+/// nagrywanie i zamyka okno. To ona stoi za przyciskiem „OK".
+const ACTION_ACCEPT: &str = "accept";
+
+/// Skrót akcji „OK" — działa wyłącznie w oknie aplikacji, nie globalnie.
+const ACCEPT_ACCEL: &str = "<Super>c";
 
 fn main() -> gtk4::glib::ExitCode {
     // Polecenia administracyjne obsługujemy przed uruchomieniem GTK —
@@ -136,6 +149,8 @@ Użycie:
   diktate-gtk --remove-shortcut    usuwa zarejestrowany skrót
   diktate-gtk --help               ten opis
 
+W oknie: Super+C kopiuje tekst, zatrzymuje nagrywanie i zamyka okno.
+
 W środowiskach spoza GNOME zwiąż własnym narzędziem polecenie
 `diktate-gtk --toggle`."
     );
@@ -187,6 +202,378 @@ fn subtitle_for_state(state: SessionState, backlog: u32) -> String {
         (SessionState::Idle, n) => format!("Przetwarzam {}…", backlog_phrase(n)),
         (SessionState::Recording, 0) => "Nagrywam".to_string(),
         (SessionState::Recording, n) => format!("Nagrywam · przetwarzam {}", backlog_phrase(n)),
+    }
+}
+
+/// Stan połączenia z daemonem widziany przez przycisk nagrywania.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Link {
+    #[default]
+    Connecting,
+    Spawning,
+    Ready,
+    Lost,
+}
+
+/// Bramka między żądaniem nagrywania a klientem.
+///
+/// Skrót globalny potrafi wystartować całą aplikację: akcja `toggle-recording`
+/// odpala się wtedy **przed** połączeniem z daemonem, a bywa że i przed jego
+/// uruchomieniem. Przełączanie wtedy samego przycisku dawało stan, w którym
+/// przycisk wygląda na wciśnięty, `session.start` nigdy nie poszedł, a
+/// użytkownik musiał nacisnąć dwa razy, żeby cokolwiek nagrać. Bramka takie
+/// żądanie **odkłada** i wykonuje je dopiero, gdy jest z kim rozmawiać —
+/// pełną drogą, przez ten sam przycisk, więc razem z ikoną nagrywania,
+/// wskaźnikiem poziomu i podtytułem.
+#[derive(Default)]
+struct Gate {
+    link: Cell<Link>,
+    pending: Cell<bool>,
+}
+
+impl Gate {
+    fn link(&self) -> Link {
+        self.link.get()
+    }
+
+    fn pending(&self) -> bool {
+        self.pending.get()
+    }
+
+    /// Żądanie przełączenia nagrywania. `true` = wykonaj je teraz na
+    /// przycisku, `false` = odłożone albo nie ma czego odkładać.
+    fn request(&self) -> bool {
+        match self.link.get() {
+            Link::Ready => true,
+            // Połączenie jest w drodze: drugie naciśnięcie odwołuje
+            // pierwsze, tak jak drugie kliknięcie przycisku.
+            Link::Connecting | Link::Spawning => {
+                self.pending.set(!self.pending.get());
+                false
+            }
+            // Nikt nie odbierze i nikt nie wróci — nie obiecujemy nagrania,
+            // którego nie będzie.
+            Link::Lost => false,
+        }
+    }
+
+    fn spawning(&self) {
+        self.link.set(Link::Spawning);
+    }
+
+    /// Połączenie stanęło. `true` = jest odłożone żądanie do wykonania.
+    fn ready(&self) -> bool {
+        self.link.set(Link::Ready);
+        self.pending.take()
+    }
+
+    fn lost(&self) {
+        self.link.set(Link::Lost);
+        self.pending.set(false);
+    }
+}
+
+/// Czy dyktowanie można domknąć już teraz.
+///
+/// „OK" ma oddać **cały** podyktowany tekst, a ostatnia wypowiedź bywa
+/// jeszcze w transkrypcji w chwili naciśnięcia skrótu. Domykamy więc dopiero
+/// wtedy, gdy mikrofon milczy i kolejka jest pusta — inaczej skrót zjadałby
+/// ostatnie zdanie.
+fn accept_ready(recording: bool, backlog: u32) -> bool {
+    !recording && backlog == 0
+}
+
+/// Domknięcie dyktowania odłożone do ucichnięcia kolejki.
+///
+/// Żądanie z przycisku „OK" albo ze skrótu rzadko trafia w moment, w którym
+/// nie ma już nic do przetworzenia. Dlatego jest tu tak samo odkładane jak
+/// żądanie nagrywania w [`Gate`]: zapamiętujemy je, a wykonujemy z obsługi
+/// `state.changed`, gdy `backlog` spadnie do zera.
+struct Accept {
+    pending: Cell<bool>,
+    backlog: Cell<u32>,
+    finish: Box<dyn Fn()>,
+}
+
+impl Accept {
+    fn new(finish: Box<dyn Fn()>) -> Self {
+        Self {
+            pending: Cell::new(false),
+            backlog: Cell::new(0),
+            finish,
+        }
+    }
+
+    /// Żądanie domknięcia. Zwraca `true`, jeśli trzeba jeszcze zatrzymać
+    /// nagrywanie — samo zatrzymanie należy do przycisku, żeby szła
+    /// jedna ścieżka (`session.stop`, podtytuł, wskaźnik poziomu).
+    fn request(&self, recording: bool) -> bool {
+        if accept_ready(recording, self.backlog.get()) {
+            (self.finish)();
+            return false;
+        }
+        self.pending.set(true);
+        recording
+    }
+
+    /// Nowy stan sesji z daemona. Domyka, jeśli czekaliśmy właśnie na to.
+    fn on_state(&self, recording: bool, backlog: u32) {
+        self.backlog.set(backlog);
+        if self.pending.get() && accept_ready(recording, backlog) {
+            self.pending.set(false);
+            (self.finish)();
+        }
+    }
+
+    /// Połączenie padło — nie ma na co czekać. Oddajemy to, co jest.
+    fn give_up(&self) {
+        if self.pending.take() {
+            (self.finish)();
+        }
+    }
+
+    fn cancel(&self) {
+        self.pending.set(false);
+    }
+}
+
+/// Podtytuł w fazie, gdy okno nie ma jeszcze klienta. Mówi nie tylko, na co
+/// czekamy, ale i to, że odłożone żądanie nagrywania nie przepadło.
+fn connecting_subtitle(link: Link, pending: bool) -> &'static str {
+    match (link, pending) {
+        (Link::Connecting, false) => "Łączę z daemonem…",
+        (Link::Connecting, true) => "Łączę z daemonem — zaraz zacznę nagrywać…",
+        (Link::Spawning, false) => "Uruchamiam daemona…",
+        (Link::Spawning, true) => "Uruchamiam daemona — zaraz zacznę nagrywać…",
+        (Link::Ready, _) => "Gotowe",
+        (Link::Lost, _) => "Daemon się rozłączył",
+    }
+}
+
+/// Pokazuje fazę łączenia: podtytuł i spinner obok tytułu.
+///
+/// Spinner w tej fazie znaczy „czekam, żeby zacząć nagrywać" — kręci się
+/// wyłącznie wtedy, gdy jest odłożone żądanie, żeby zwykły start okna nie
+/// migotał bez powodu. Po połączeniu ten sam spinner przejmuje licznik
+/// zaległości transkrypcji.
+fn show_connecting(window_title: &WindowTitle, spinner: &Spinner, gate: &Gate) {
+    window_title.set_subtitle(connecting_subtitle(gate.link(), gate.pending()));
+    if gate.pending() {
+        spinner.set_visible(true);
+        spinner.start();
+    } else {
+        spinner.stop();
+        spinner.set_visible(false);
+    }
+}
+
+/// Widżety, które ożywają dopiero z połączeniem.
+///
+/// Zbieramy je w jedno miejsce, bo podłączenie klienta dzieje się już po
+/// pokazaniu okna — asynchronicznie, w odpowiedzi na wiadomość z wątku
+/// łączącego. Bez tej struktury każdy widżet trzeba by klonować z osobna
+/// do bloku `async`.
+struct Ui {
+    window_title: WindowTitle,
+    backlog_spinner: Spinner,
+    level_bar: LevelBar,
+    record_button: ToggleButton,
+    document: Rc<DocumentView>,
+    tray: Option<TrayHandle>,
+    show_level_meter: bool,
+    gate: Rc<Gate>,
+    accept: Rc<Accept>,
+}
+
+/// Co wątek łączący ma do powiedzenia oknu.
+enum ConnectEvent {
+    /// Daemona nie było — właśnie został uruchomiony i czekamy na gniazdo.
+    Spawning,
+    Ready(Client),
+    Failed(String),
+}
+
+/// Łączy się z daemonem w tle i podłącza okno, gdy połączenie stanie.
+///
+/// Czekanie na gniazdo blokuje wątek na tyle długo (wczytanie modelu
+/// whispera), że pętla GTK nie może go dotknąć — stąd osobny wątek i kanał.
+fn spawn_connect(ui: Ui, config: diktate_config::GtkDaemonConfig) {
+    let (tx, rx) = async_channel::unbounded::<ConnectEvent>();
+    let timeout = std::time::Duration::from_millis(config.start_timeout_ms);
+    let autostart = config.autostart;
+
+    let spawn_tx = tx.clone();
+    std::thread::spawn(move || {
+        let result = if autostart {
+            Client::connect_or_spawn(timeout, || {
+                let _ = spawn_tx.send_blocking(ConnectEvent::Spawning);
+            })
+        } else {
+            Client::connect()
+        };
+        let event = match result {
+            Ok(client) => ConnectEvent::Ready(client),
+            Err(err) => ConnectEvent::Failed(format!("{err:#}")),
+        };
+        let _ = tx.send_blocking(event);
+    });
+
+    let window_title = ui.window_title.clone();
+    let backlog_spinner = ui.backlog_spinner.clone();
+    let gate = Rc::clone(&ui.gate);
+    // `Option` zamiast zwykłego przeniesienia: kompilator nie wie, że
+    // pętla kończy się na pierwszym `Ready` albo `Failed`, więc uchwyt
+    // musimy z niej wyjąć, a nie przenieść.
+    let mut ui = Some(ui);
+    gtk4::glib::spawn_future_local(async move {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                ConnectEvent::Spawning => {
+                    gate.spawning();
+                    show_connecting(&window_title, &backlog_spinner, &gate);
+                }
+                ConnectEvent::Ready(client) => {
+                    if let Some(ui) = ui.take() {
+                        ui.attach(Rc::new(client));
+                    }
+                    break;
+                }
+                ConnectEvent::Failed(message) => {
+                    gate.lost();
+                    backlog_spinner.stop();
+                    backlog_spinner.set_visible(false);
+                    window_title.set_subtitle(&format!("Brak daemona: {message}"));
+                    break;
+                }
+            }
+        }
+    });
+}
+
+impl Ui {
+    /// Podłącza gotowego klienta: strumień powiadomień i przycisk nagrywania.
+    fn attach(self, client: Rc<Client>) {
+        let Ui {
+            window_title,
+            backlog_spinner,
+            level_bar,
+            record_button,
+            document,
+            tray,
+            show_level_meter,
+            gate,
+            accept,
+        } = self;
+
+        // Odczyty poziomu przychodzą tylko na prośbę — to kilkanaście
+        // wiadomości na sekundę i nie ma ich dostawać nikt, kto nie rysuje
+        // wskaźnika.
+        if show_level_meter {
+            if let Err(err) = client.subscribe_levels() {
+                eprintln!("diktate-gtk: nie udało się włączyć odczytów poziomu: {err:#}");
+            }
+        }
+        window_title.set_subtitle("Gotowe");
+        record_button.set_sensitive(true);
+        backlog_spinner.set_visible(false);
+        backlog_spinner.stop();
+
+        // Wiadomości z daemona wpadają tu asynchronicznie: tekst trafia w
+        // kotwicę wstawiania, a zmiana stanu aktualizuje podtytuł
+        // i widoczność spinnera zaległości.
+        let incoming = client.incoming();
+        let document_for_incoming = Rc::clone(&document);
+        let window_title_for_incoming = window_title.clone();
+        let backlog_spinner_for_incoming = backlog_spinner.clone();
+        let level_bar_for_incoming = level_bar.clone();
+        let record_button_for_incoming = record_button.clone();
+        let gate_for_incoming = Rc::clone(&gate);
+        let accept_for_incoming = Rc::clone(&accept);
+        gtk4::glib::spawn_future_local(async move {
+            while let Ok(message) = incoming.recv().await {
+                match message {
+                    Incoming::Segment(segment) => {
+                        document_for_incoming.insert_segment(&segment);
+                    }
+                    Incoming::Level { rms } => {
+                        level_bar_for_incoming.set_value(meter_value(rms));
+                    }
+                    Incoming::State { state, backlog } => {
+                        window_title_for_incoming.set_subtitle(&subtitle_for_state(state, backlog));
+                        if let Some(handle) = &tray {
+                            handle.update(|tray| {
+                                tray.set_state(state == SessionState::Recording, backlog)
+                            });
+                        }
+                        let nagrywa = state == SessionState::Recording;
+                        // Odłożone „OK" domyka się dokładnie tutaj: gdy
+                        // mikrofon zamilkł, a kolejka transkrypcji zeszła
+                        // do zera, czyli cały tekst jest już w dokumencie.
+                        accept_for_incoming.on_state(nagrywa, backlog);
+                        level_bar_for_incoming.set_visible(nagrywa);
+                        if !nagrywa {
+                            level_bar_for_incoming.set_value(0.0);
+                        }
+
+                        if backlog > 0 {
+                            backlog_spinner_for_incoming.set_visible(true);
+                            backlog_spinner_for_incoming.start();
+                        } else {
+                            backlog_spinner_for_incoming.stop();
+                            backlog_spinner_for_incoming.set_visible(false);
+                        }
+                    }
+                }
+            }
+
+            // Kanał się zamknął — daemon się rozłączył. Zatrzymujemy
+            // spinner, żeby nic nie kręciło się bez powodu przy martwym
+            // połączeniu, i blokujemy przycisk: nie ma dokąd wysłać
+            // `session.start`.
+            backlog_spinner_for_incoming.stop();
+            backlog_spinner_for_incoming.set_visible(false);
+            level_bar_for_incoming.set_visible(false);
+            gate_for_incoming.lost();
+            // Nie ma już kto dosłać ostatniej wypowiedzi — oddajemy
+            // schowkowi to, co zdążyło dojść, zamiast wisieć w oczekiwaniu.
+            accept_for_incoming.give_up();
+            // Najpierw odciskamy przycisk (przy okazji gasi klasę
+            // `destructive-action`), dopiero potem piszemy podtytuł —
+            // nieudany `session.stop` na martwym gnieździe zdążyłby go
+            // nadpisać komunikatem o błędzie.
+            record_button_for_incoming.set_active(false);
+            record_button_for_incoming.set_sensitive(false);
+            window_title_for_incoming.set_subtitle("Daemon się rozłączył");
+        });
+
+        record_button.connect_toggled(move |button| {
+            // Klasa CSS pokazuje stan nagrywania na pierwszy rzut oka —
+            // tak jak w systemowych aplikacjach GNOME (np. Nagrywanie
+            // dźwięku). Sam tekst podtytułu nie jest tu zgadywany — czeka
+            // na potwierdzenie przez `state.changed`.
+            if button.is_active() {
+                button.add_css_class("destructive-action");
+            } else {
+                button.remove_css_class("destructive-action");
+            }
+
+            let result = if button.is_active() {
+                client.start()
+            } else {
+                client.stop()
+            };
+            if let Err(err) = result {
+                window_title.set_subtitle(&format!("Błąd: {err}"));
+                button.set_active(false);
+            }
+        });
+
+        // Skrót globalny naciśnięty, zanim było z kim rozmawiać: dopiero
+        // teraz puszczamy go w ruch — tą samą drogą co kliknięcie, więc
+        // z ikoną nagrywania, wskaźnikiem poziomu i podtytułem ze stanu.
+        if gate.ready() {
+            record_button.set_active(true);
+        }
     }
 }
 
@@ -256,10 +643,19 @@ fn build_ui(app: &Application) {
         .icon_name("edit-copy-symbolic")
         .tooltip_text("Kopiuj do schowka")
         .build();
+    // Przycisk domykający: kopiuje i zamyka okno jednym ruchem. Jako
+    // czynność sugerowana (`suggested-action`) stoi po prawej stronie
+    // paska nagłówka — tak GNOME oznacza główne wyjście z widoku.
+    let accept_button = gtk4::Button::builder()
+        .label("OK")
+        .tooltip_text("Kopiuj, zamknij nagrywanie i okno (Super+C)")
+        .build();
+    accept_button.add_css_class("suggested-action");
 
     let header = HeaderBar::new();
     header.set_title_widget(Some(&title_box));
     header.pack_start(&record_button);
+    header.pack_end(&accept_button);
     header.pack_end(&copy_button);
 
     // Wskaźnik poziomu tuż pod paskiem nagłówka: widoczny wyłącznie w trakcie
@@ -307,35 +703,67 @@ fn build_ui(app: &Application) {
         stack_for_buffer.set_visible_child_name(page);
     });
 
-    let client = match Client::connect() {
-        Ok(client) => {
-            window_title.set_subtitle("Gotowe");
-            // Odczyty poziomu przychodzą tylko na prośbę — to kilkanaście
-            // wiadomości na sekundę i nie ma ich dostawać nikt, kto nie
-            // rysuje wskaźnika.
-            if config.window.show_level_meter {
-                if let Err(err) = client.subscribe_levels() {
-                    eprintln!("diktate-gtk: nie udało się włączyć odczytów poziomu: {err:#}");
-                }
-            }
-            Some(Rc::new(client))
-        }
-        Err(err) => {
-            record_button.set_sensitive(false);
-            window_title.set_subtitle(&format!("Brak daemona: {err}"));
-            None
-        }
+    // Bramka pilnuje, żeby żądanie nagrywania z pustego biurka nie przepadło
+    // ani nie skończyło się przyciskiem, który tylko wygląda na wciśnięty.
+    let gate = Rc::new(Gate::default());
+
+    // Domknięcie dyktowania w jednym miejscu: schowek dostaje cały tekst
+    // dokumentu (nie zaznaczenie), a okno się zamyka. Daemon zostaje —
+    // kolejne wywołanie skrótu globalnego podniesie okno na nowo.
+    let accept = {
+        let document = Rc::clone(&document);
+        let window = window.clone();
+        Rc::new(Accept::new(Box::new(move || {
+            window.clipboard().set_text(&document.text());
+            window.close();
+        })))
     };
 
     // Akcja dla skrótu globalnego: przełącza przycisk nagrywania, a cała
     // reszta (start/stop sesji, podtytuł) dzieje się już tą samą drogą co
-    // przy kliknięciu — jedna ścieżka zamiast dwóch.
+    // przy kliknięciu — jedna ścieżka zamiast dwóch. Gdy klienta jeszcze
+    // nie ma, żądanie czeka w bramce i ruszy tą samą drogą po połączeniu.
     let toggle_action = gtk4::gio::SimpleAction::new(ACTION_TOGGLE, None);
     let record_button_for_action = record_button.clone();
+    let window_title_for_action = window_title.clone();
+    let backlog_spinner_for_action = backlog_spinner.clone();
+    let gate_for_action = Rc::clone(&gate);
+    let accept_for_toggle = Rc::clone(&accept);
     toggle_action.connect_activate(move |_, _| {
-        record_button_for_action.set_active(!record_button_for_action.is_active());
+        // Powrót do mikrofonu odwołuje odłożone „OK" — inaczej okno
+        // zamknęłoby się w środku następnego dyktowania.
+        accept_for_toggle.cancel();
+        if gate_for_action.request() {
+            record_button_for_action.set_active(!record_button_for_action.is_active());
+        } else {
+            show_connecting(
+                &window_title_for_action,
+                &backlog_spinner_for_action,
+                &gate_for_action,
+            );
+        }
     });
     app.add_action(&toggle_action);
+
+    // „OK" jako akcja aplikacji, nie tylko sygnał przycisku: skrót
+    // `Super+C` ma trafiać w to samo, a akcja jest jedynym miejscem,
+    // gdzie wiąże się jedno z drugim. Skrót jest lokalny — działa, gdy
+    // okno ma ognisko, i nie zabiera kombinacji reszcie systemu.
+    let accept_action = gtk4::gio::SimpleAction::new(ACTION_ACCEPT, None);
+    let accept_for_action = Rc::clone(&accept);
+    let record_button_for_accept = record_button.clone();
+    accept_action.connect_activate(move |_, _| {
+        if accept_for_action.request(record_button_for_accept.is_active()) {
+            // Zatrzymanie idzie tą samą drogą co kliknięcie przycisku:
+            // `session.stop`, podtytuł i wskaźnik poziomu bez duplikatu.
+            record_button_for_accept.set_active(false);
+        }
+    });
+    app.add_action(&accept_action);
+    app.set_accels_for_action(&format!("app.{ACTION_ACCEPT}"), &[ACCEPT_ACCEL]);
+
+    let accept_action_for_button = accept_action.clone();
+    accept_button.connect_clicked(move |_| accept_action_for_button.activate(None));
 
     // Ikona w tray-u rozmawia z oknem kanałem — żyje na własnym wątku
     // i nie wolno jej dotykać widgetów GTK.
@@ -365,80 +793,24 @@ fn build_ui(app: &Application) {
         None
     };
 
-    if let Some(client) = client {
-        // Wiadomości z daemona wpadają tu asynchronicznie: tekst trafia na
-        // koniec bufora, a zmiana stanu aktualizuje podtytuł i widoczność
-        // spinnera zaległości.
-        let incoming = client.incoming();
-        let document_for_incoming = Rc::clone(&document);
-        let window_title_for_incoming = window_title.clone();
-        let backlog_spinner_for_incoming = backlog_spinner.clone();
-        let level_bar_for_incoming = level_bar.clone();
-        let tray_for_incoming = tray_handle;
-        gtk4::glib::spawn_future_local(async move {
-            while let Ok(message) = incoming.recv().await {
-                match message {
-                    Incoming::Segment(segment) => {
-                        document_for_incoming.insert_segment(&segment);
-                    }
-                    Incoming::Level { rms } => {
-                        level_bar_for_incoming.set_value(meter_value(rms));
-                    }
-                    Incoming::State { state, backlog } => {
-                        window_title_for_incoming.set_subtitle(&subtitle_for_state(state, backlog));
-                        if let Some(handle) = &tray_for_incoming {
-                            handle.update(|tray| {
-                                tray.set_state(state == SessionState::Recording, backlog)
-                            });
-                        }
-                        let nagrywa = state == SessionState::Recording;
-                        level_bar_for_incoming.set_visible(nagrywa);
-                        if !nagrywa {
-                            level_bar_for_incoming.set_value(0.0);
-                        }
-
-                        if backlog > 0 {
-                            backlog_spinner_for_incoming.set_visible(true);
-                            backlog_spinner_for_incoming.start();
-                        } else {
-                            backlog_spinner_for_incoming.stop();
-                            backlog_spinner_for_incoming.set_visible(false);
-                        }
-                    }
-                }
-            }
-
-            // Kanał się zamknął — daemon się rozłączył. Zatrzymujemy
-            // spinner, żeby nic nie kręciło się bez powodu przy martwym
-            // połączeniu.
-            backlog_spinner_for_incoming.stop();
-            backlog_spinner_for_incoming.set_visible(false);
-            level_bar_for_incoming.set_visible(false);
-            window_title_for_incoming.set_subtitle("Daemon się rozłączył");
-        });
-
-        record_button.connect_toggled(move |button| {
-            // Klasa CSS pokazuje stan nagrywania na pierwszy rzut oka —
-            // tak jak w systemowych aplikacjach GNOME (np. Nagrywanie
-            // dźwięku). Sam tekst podtytułu nie jest tu zgadywany — czeka
-            // na potwierdzenie przez `state.changed`.
-            if button.is_active() {
-                button.add_css_class("destructive-action");
-            } else {
-                button.remove_css_class("destructive-action");
-            }
-
-            let result = if button.is_active() {
-                client.start()
-            } else {
-                client.stop()
-            };
-            if let Err(err) = result {
-                window_title.set_subtitle(&format!("Błąd: {err}"));
-                button.set_active(false);
-            }
-        });
-    }
+    // Połączenie z daemonem idzie osobnym wątkiem. Gdy daemona nie ma,
+    // klient sam go uruchamia i czeka na gniazdo — a to trwa tyle, ile
+    // wczytanie modelu whispera, czyli sekundy. Okno przez ten czas jest
+    // już otwarte i odpowiada; przycisk nagrywania budzi się dopiero
+    // z połączeniem.
+    record_button.set_sensitive(false);
+    let ui = Ui {
+        window_title: window_title.clone(),
+        backlog_spinner: backlog_spinner.clone(),
+        level_bar: level_bar.clone(),
+        record_button: record_button.clone(),
+        document: Rc::clone(&document),
+        tray: tray_handle,
+        show_level_meter: config.window.show_level_meter,
+        gate,
+        accept: Rc::clone(&accept),
+    };
+    spawn_connect(ui, config.daemon.clone());
 
     let document_for_copy = Rc::clone(&document);
     let toast_overlay_for_copy = toast_overlay.clone();
@@ -474,6 +846,151 @@ fn build_ui(app: &Application) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ok_czeka_az_ucichnie_mikrofon_i_kolejka() {
+        // Najważniejszy przypadek: skrót naciśnięty tuż po ostatnim zdaniu,
+        // które siedzi jeszcze w transkrypcji. Domknięcie musi poczekać.
+        assert!(!accept_ready(true, 0), "nagrywanie trwa");
+        assert!(!accept_ready(false, 1), "ostatnia wypowiedź w kolejce");
+        assert!(!accept_ready(true, 3));
+        assert!(accept_ready(false, 0), "cisza i pusta kolejka");
+    }
+
+    #[test]
+    fn ok_w_ciszy_domyka_od_razu() {
+        let done = Rc::new(Cell::new(0u32));
+        let done_for_accept = Rc::clone(&done);
+        let accept = Accept::new(Box::new(move || {
+            done_for_accept.set(done_for_accept.get() + 1)
+        }));
+
+        assert!(!accept.request(false), "nie ma czego zatrzymywać");
+        assert_eq!(done.get(), 1);
+    }
+
+    #[test]
+    fn ok_w_trakcie_nagrywania_domyka_dopiero_po_opustoszeniu_kolejki() {
+        let done = Rc::new(Cell::new(0u32));
+        let done_for_accept = Rc::clone(&done);
+        let accept = Accept::new(Box::new(move || {
+            done_for_accept.set(done_for_accept.get() + 1)
+        }));
+
+        assert!(accept.request(true), "trzeba zatrzymać nagrywanie");
+        assert_eq!(done.get(), 0);
+
+        accept.on_state(false, 2);
+        assert_eq!(done.get(), 0, "kolejka jeszcze pracuje");
+
+        accept.on_state(false, 0);
+        assert_eq!(done.get(), 1);
+
+        // Kolejne stany nie domykają po raz drugi.
+        accept.on_state(false, 0);
+        assert_eq!(done.get(), 1);
+    }
+
+    #[test]
+    fn ponowne_nagrywanie_odwoluje_odlozone_ok() {
+        let done = Rc::new(Cell::new(0u32));
+        let done_for_accept = Rc::clone(&done);
+        let accept = Accept::new(Box::new(move || {
+            done_for_accept.set(done_for_accept.get() + 1)
+        }));
+
+        accept.request(true);
+        accept.cancel();
+        accept.on_state(false, 0);
+        assert_eq!(done.get(), 0, "użytkownik wrócił do dyktowania");
+    }
+
+    #[test]
+    fn utrata_daemona_oddaje_to_co_jest() {
+        let done = Rc::new(Cell::new(0u32));
+        let done_for_accept = Rc::clone(&done);
+        let accept = Accept::new(Box::new(move || {
+            done_for_accept.set(done_for_accept.get() + 1)
+        }));
+
+        accept.request(true);
+        accept.give_up();
+        assert_eq!(done.get(), 1);
+        accept.give_up();
+        assert_eq!(done.get(), 1, "raz, nie za każdym rozłączeniem");
+    }
+
+    #[test]
+    fn zadanie_nagrywania_przed_polaczeniem_czeka_zamiast_przepasc() {
+        let gate = Gate::default();
+        // Skrót globalny naciśnięty, zanim daemon odpowiedział.
+        assert!(!gate.request(), "przycisku nie wolno wtedy przełączać");
+        assert!(gate.pending());
+
+        // Połączenie stanęło — dopiero teraz nagrywanie ma ruszyć.
+        assert!(gate.ready());
+        assert_eq!(gate.link(), Link::Ready);
+        assert!(!gate.pending(), "żądanie zostało zużyte");
+    }
+
+    #[test]
+    fn drugie_nacisniecie_w_trakcie_laczenia_odwoluje_pierwsze() {
+        let gate = Gate::default();
+        assert!(!gate.request());
+        assert!(!gate.request());
+        assert!(!gate.pending());
+        assert!(!gate.ready(), "nie ma czego uruchamiać po połączeniu");
+    }
+
+    #[test]
+    fn po_polaczeniu_zadanie_idzie_wprost_do_przycisku() {
+        let gate = Gate::default();
+        gate.ready();
+        assert!(gate.request(), "to już zwykłe kliknięcie");
+        assert!(!gate.pending(), "nic się nie odkłada");
+    }
+
+    #[test]
+    fn uruchamianie_daemona_nie_gubi_odlozonego_zadania() {
+        let gate = Gate::default();
+        assert!(!gate.request());
+        gate.spawning();
+        assert_eq!(gate.link(), Link::Spawning);
+        assert!(gate.pending());
+        assert!(gate.ready());
+    }
+
+    #[test]
+    fn po_utracie_polaczenia_nic_nie_czeka_w_bramce() {
+        let gate = Gate::default();
+        assert!(!gate.request());
+        gate.lost();
+        assert!(!gate.pending(), "odłożone żądanie przepada razem z daemonem");
+        // Nie obiecujemy nagrania, którego nie będzie — nikt nie wraca po
+        // to żądanie, bo ponowne łączenie jeszcze nie istnieje.
+        assert!(!gate.request());
+        assert!(!gate.pending());
+    }
+
+    #[test]
+    fn podtytul_mowi_o_czekajacym_nagrywaniu() {
+        assert_eq!(
+            connecting_subtitle(Link::Connecting, false),
+            "Łączę z daemonem…"
+        );
+        assert_eq!(
+            connecting_subtitle(Link::Spawning, false),
+            "Uruchamiam daemona…"
+        );
+        assert_eq!(
+            connecting_subtitle(Link::Spawning, true),
+            "Uruchamiam daemona — zaraz zacznę nagrywać…"
+        );
+        assert_eq!(
+            connecting_subtitle(Link::Connecting, true),
+            "Łączę z daemonem — zaraz zacznę nagrywać…"
+        );
+    }
 
     #[test]
     fn liczba_pojedyncza_dla_jednej_wypowiedzi() {

@@ -116,6 +116,10 @@ width = 620
 height = 420
 show_level_meter = true
 
+[daemon]
+autostart = true               # brak daemona = klient sam go uruchamia
+start_timeout_ms = 30000       # ile czekać na gniazdo (mieści wczytanie modelu)
+
 [dictation]
 insert_at_cursor = true        # segment wchodzi w miejscu karetki, nie na końcu
 auto_space = true              # spacja rozdzielająca na stykach
