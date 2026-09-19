@@ -85,7 +85,7 @@ Jedno repozytorium, cargo workspace.
 | Crate | Typ | Odpowiedzialność |
 |-------|-----|------------------|
 | `diktate-core` | lib | Capture, VAD, kolejka segmentów, whisper, journal, config daemona |
-| `diktate-proto` | lib | Typy protokołu IPC (serde). Jedyne źródło kształtu wiadomości |
+| `diktate-proto` | lib | Typy protokołu IPC (serde). Jedyne źródło kształtu wiadomości. Trzyma też lokalizacje sesyjne — ścieżkę gniazda i plik PID — bo są wspólne dla daemona i klientów |
 | `diktate-document` | lib | Model dokumentu: spany, operacje, splice, undo |
 | `diktate-daemon` | bin | `diktate-core` + serwer IPC |
 | `diktate-cli` | bin | Klient terminalowy, zarządzanie modelami, `toggle` |

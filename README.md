@@ -46,9 +46,9 @@ diktate model list                 # co jest do wyboru i co już masz
 diktate model pull small-q5_1      # pobranie do ~/.diktate/models/
 ```
 
-Ścieżka modelu jest ustalana przez zmienną środowiskową `DIKTATE_MODEL`
-(jeśli ustawiona), potem przez pole `whisper.model` w `daemon.toml`,
-a domyślnie to `~/.diktate/models/ggml-small-q5_1.bin`.
+Ścieżka modelu jest ustalana przez pole `whisper.model` w `daemon.toml`;
+gdy jest puste, o kolejności decyduje zmienna środowiskowa `DIKTATE_MODEL`
+(jeśli ustawiona), a domyślnie to `~/.diktate/models/ggml-small-q5_1.bin`.
 
 ## Budowanie
 
