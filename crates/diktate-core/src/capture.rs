@@ -256,7 +256,6 @@ where
     Ok((stream, (channels, sample_rate)))
 }
 
-/// Miks do mono i zmiana częstotliwości na 16 kHz.
 /// Nazwy urządzeń wejściowych widzianych przez cpal.
 ///
 /// Kreator wymienia je przy pytaniu o mikrofon. Brak serwera dźwięku nie
@@ -270,6 +269,7 @@ pub fn input_device_names() -> Result<Vec<String>> {
     Ok(devices.filter_map(|d| d.name().ok()).collect())
 }
 
+/// Miks do mono i zmiana częstotliwości na 16 kHz.
 fn prepare(captured: Captured) -> Vec<f32> {
     let mono = to_mono(&captured.samples, captured.channels);
     resample(&mono, captured.sample_rate, SAMPLE_RATE)
