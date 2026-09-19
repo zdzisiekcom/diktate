@@ -12,7 +12,7 @@ pub struct Rhythm {
     pub long_segment_ms: u32,
     pub silence_ms_to_end_long: u32,
     pub silence_ms_to_end: u32,
-    pub opis: &'static str,
+    pub description: &'static str,
 }
 
 pub const RHYTHMS: &[Rhythm] = &[
@@ -21,21 +21,21 @@ pub const RHYTHMS: &[Rhythm] = &[
         long_segment_ms: 2_000,
         silence_ms_to_end_long: 200,
         silence_ms_to_end: 1_200,
-        opis: "tekst pojawia się najszybciej; wymaga szybkiego modelu",
+        description: "tekst pojawia się najszybciej; wymaga szybkiego modelu",
     },
     Rhythm {
         name: "zrównoważony",
         long_segment_ms: 2_500,
         silence_ms_to_end_long: 200,
         silence_ms_to_end: 1_500,
-        opis: "domyślny — sprawdzony dla small-q5_1",
+        description: "domyślny — sprawdzony dla small-q5_1",
     },
     Rhythm {
         name: "dokładny",
         long_segment_ms: 4_000,
         silence_ms_to_end_long: 400,
         silence_ms_to_end: 2_000,
-        opis: "dłuższe segmenty, więcej kontekstu dla modelu",
+        description: "dłuższe segmenty, więcej kontekstu dla modelu",
     },
 ];
 
@@ -61,8 +61,10 @@ pub fn detect(vad: &VadConfig) -> Option<&'static Rhythm> {
 /// pełne okno 30 s, więc koszt prawie nie zależy od długości segmentu.
 const COST_SHARE_PERCENT: u64 = 62;
 
-/// O tyle segment jest dłuższy niż sam próg: dochodzi pauza domykająca
-/// i pre-roll. Próg 2500 ms daje w pomiarach segmenty ~3,4 s (`docs/04`).
+/// O tyle segment jest dłuższy niż sam próg i doliczona osobno pauza
+/// domykająca (`silence_ms_to_end_long`): pre-roll sprzed mowy plus narzut
+/// samego rozpoznania końca wypowiedzi. Próg 2500 ms z pauzą 200 ms daje
+/// w pomiarach segmenty ~3,4 s (`docs/04`: 2500 + 200 + 700 = 3400).
 const SEGMENT_OVERHEAD_MS: u32 = 700;
 
 /// Granica przepustowości: powyżej niej kolejka rośnie, a tekst pojawia się
@@ -79,8 +81,14 @@ const THROUGHPUT_LIMIT_PERCENT: u64 = 85;
 /// rzeczywistej długości segmentu; `THROUGHPUT_LIMIT_PERCENT` to granica
 /// z `CLAUDE.md` („Dobieranie `long_segment_ms`”).
 pub fn too_fast_for(rhythm: &Rhythm, run_ms: u32) -> bool {
-    let segment_ms =
-        rhythm.long_segment_ms + rhythm.silence_ms_to_end_long + SEGMENT_OVERHEAD_MS;
+    too_fast_thresholds(rhythm.long_segment_ms, rhythm.silence_ms_to_end_long, run_ms)
+}
+
+/// To samo co [`too_fast_for`], ale na gołych progach — potrzebne w
+/// `--advanced`, gdzie użytkownik ustawia `long_segment_ms` i
+/// `silence_ms_to_end_long` jako zwykłe pola, a nie przez wybór profilu.
+pub fn too_fast_thresholds(long_segment_ms: u32, silence_ms_to_end_long: u32, run_ms: u32) -> bool {
+    let segment_ms = long_segment_ms + silence_ms_to_end_long + SEGMENT_OVERHEAD_MS;
     let cost_ms = run_ms as u64 * COST_SHARE_PERCENT / 100;
     cost_ms * 100 > segment_ms as u64 * THROUGHPUT_LIMIT_PERCENT
 }
@@ -146,5 +154,22 @@ mod tests {
         // large-v3-turbo-q5_0 (14–20 s przebiegu na 20 s materiału) jest za
         // wolny nawet dla najbardziej wyrozumiałego profilu.
         assert!(too_fast_for(&RHYTHMS[2], 15_500));
+    }
+
+    #[test]
+    fn too_fast_for_i_too_fast_thresholds_dają_ten_sam_wynik() {
+        // `--advanced` sprawdza progi wynikowe przez `too_fast_thresholds`,
+        // z pominięciem profilu — obie drogi muszą się zgadzać, inaczej
+        // ostrzeżenie widziałby tylko jeden z dwóch trybów kreatora.
+        for rhythm in RHYTHMS {
+            for run_ms in [1_200, 4_500, 15_500] {
+                assert_eq!(
+                    too_fast_for(rhythm, run_ms),
+                    too_fast_thresholds(rhythm.long_segment_ms, rhythm.silence_ms_to_end_long, run_ms),
+                    "profil {} przy run_ms={run_ms}",
+                    rhythm.name,
+                );
+            }
+        }
     }
 }

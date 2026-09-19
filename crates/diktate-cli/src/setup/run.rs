@@ -3,7 +3,7 @@
 //! Domyślne odpowiedzi to wartości **dzisiejsze**, a nie fabryczne: kreator
 //! uruchomiony po raz drugi ma poprawiać to, co jest, a nie kasować strojenie.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use diktate_config::{DaemonConfig, GtkConfig};
 
 use crate::model::{catalog, cmd};
@@ -28,7 +28,7 @@ pub fn run(advanced: bool) -> Result<()> {
                 m.name,
                 cmd::format_size(m.bytes),
                 m.run_ms as f32 / 1000.0,
-                m.polish.opis()
+                m.polish.description()
             )
         })
         .collect();
@@ -43,8 +43,30 @@ pub fn run(advanced: bool) -> Result<()> {
         });
     let choice = dialog::ask_choice("Który model whispera?", &options, default)?;
     let model = &catalog::MODELS[choice];
-    let path = cmd::pull_model(model)?;
-    daemon.whisper.model = path.display().to_string();
+    // Pobranie idzie do 547 MB (`CLAUDE.md`) — zanim kreator ruszy siecią,
+    // ma o tym powiedzieć wprost, a nie zacząć ściągać zaraz po wyborze
+    // z listy. Model już obecny na dysku nie potrzebuje pytania: `pull_model`
+    // i tak nie dotknie sieci, samo pytanie byłoby czczym rytuałem.
+    let should_download = model.installed().is_some()
+        || dialog::ask_bool(
+            &format!(
+                "Pobrać model {} ({})?",
+                model.name,
+                cmd::format_size(model.bytes)
+            ),
+            true,
+        )?;
+    let mut model_not_downloaded_hint: Option<String> = None;
+    if should_download {
+        let path = cmd::pull_model(model)?;
+        daemon.whisper.model = path.display().to_string();
+    } else {
+        model_not_downloaded_hint = Some(format!(
+            "Model {} nie został pobrany — whisper.model zostaje bez zmiany. \
+             Pobranie później: diktate model pull {}",
+            model.name, model.name
+        ));
+    }
 
     // --- język ---
     daemon.whisper.language =
@@ -83,7 +105,7 @@ pub fn run(advanced: bool) -> Result<()> {
         // odpowiedź pod Enterem.
         let mut options: Vec<String> = profile::RHYTHMS
             .iter()
-            .map(|r| format!("{:<14} {} ms — {}", r.name, r.long_segment_ms, r.opis))
+            .map(|r| format!("{:<14} {} ms — {}", r.name, r.long_segment_ms, r.description))
             .collect();
         let own_index = if profile::current(&daemon).is_none() {
             options.push(format!(
@@ -131,6 +153,10 @@ pub fn run(advanced: bool) -> Result<()> {
 
     // --- GTK ---
     gtk.tray.enabled = dialog::ask_bool("Ikona w zasobniku systemowym?", gtk.tray.enabled)?;
+    println!(
+        "\nSkrót naprawdę globalny (działa spoza okna) rejestruje się osobno: \
+         diktate-gtk --install-shortcut \"<Control><Alt>d\""
+    );
     gtk.shortcuts.toggle_recording = dialog::ask_text(
         "Skrót przełączający nagrywanie w oknie (globalny rejestruje środowisko graficzne)",
         &gtk.shortcuts.toggle_recording,
@@ -144,24 +170,62 @@ pub fn run(advanced: bool) -> Result<()> {
     // Kreator nie potrafi zapisać pliku, który zablokowałby start daemona
     // albo klienta (docs/04, „Zapis"). `from_toml` woła walidację `diktate-config`
     // wewnątrz, więc nie utrzymujemy tu drugiej, własnej listy reguł.
-    let daemon_text = write::daemon_toml(&daemon);
-    let gtk_text = write::gtk_toml(&gtk);
-    if let Err(e) = DaemonConfig::from_toml(&daemon_text) {
+    //
+    // `--advanced` pyta o surowe liczby, więc błąd walidacji nie może
+    // wyrzucać całej sesji pytań — wraca do `ask_rest` z wartościami, które
+    // użytkownik już podał, i próbuje ponownie. Krótka ścieżka nie ma czego
+    // poprawiać w ten sposób (pytania o profil już same pilnują spójności),
+    // więc tam błąd kończy kreator, i to niezerowym kodem wyjścia (`bail!`),
+    // a nie cichym `Ok(())`.
+    let (daemon_text, gtk_text) = loop {
+        // Ostrzeżenie o zbyt szybkim rytmie należy do kreatora niezależnie od
+        // tego, którą ścieżką się do niego doszło (docs/04) — krótka ścieżka
+        // pyta o nie przy wyborze profilu, `--advanced` dopiero tutaj, bo
+        // dopiero teraz zna progi wynikowe.
+        if advanced
+            && profile::too_fast_thresholds(
+                daemon.vad.long_segment_ms,
+                daemon.vad.silence_ms_to_end_long,
+                model.run_ms,
+            )
+        {
+            println!(
+                "\nUwaga: przy modelu {} segment w tym rytmie kosztuje więcej, niż trwa.",
+                model.name
+            );
+            println!("Kolejka będzie rosła, a tekst pojawiał się coraz później, nie wcześniej.");
+            if !dialog::ask_bool("Mimo to zostawić te progi?", false)? {
+                ask_rest(&mut daemon, &mut gtk)?;
+                continue;
+            }
+        }
+
+        let daemon_text = write::daemon_toml(&daemon);
+        let gtk_text = write::gtk_toml(&gtk);
+        let error = DaemonConfig::from_toml(&daemon_text)
+            .err()
+            .or_else(|| GtkConfig::from_toml(&gtk_text).err());
+        let Some(e) = error else {
+            break (daemon_text, gtk_text);
+        };
         println!("\nTa konfiguracja nie wystartuje: {e}");
-        println!("Nic nie zapisano.");
-        return Ok(());
-    }
-    if let Err(e) = GtkConfig::from_toml(&gtk_text) {
-        println!("\nTa konfiguracja nie wystartuje: {e}");
-        println!("Nic nie zapisano.");
-        return Ok(());
-    }
+        if !advanced {
+            bail!("Nic nie zapisano.");
+        }
+        if !dialog::ask_bool("Poprawić odpowiedzi?", true)? {
+            bail!("Nic nie zapisano.");
+        }
+        ask_rest(&mut daemon, &mut gtk)?;
+    };
 
     // --- podgląd i zapis ---
     let changes_daemon = diff::changes(&daemon_before, &daemon)?;
     let changes_gtk = diff::changes(&gtk_before, &gtk)?;
     if changes_daemon.is_empty() && changes_gtk.is_empty() {
         println!("\nNic się nie zmieniło — nie ma czego zapisywać.");
+        if let Some(hint) = &model_not_downloaded_hint {
+            println!("\n{hint}");
+        }
         return Ok(());
     }
     println!("\nZmiany:");
@@ -170,26 +234,47 @@ pub fn run(advanced: bool) -> Result<()> {
     }
     if !dialog::ask_bool("Zapisać?", true)? {
         println!("Nic nie zapisano.");
+        if let Some(hint) = &model_not_downloaded_hint {
+            println!("\n{hint}");
+        }
         return Ok(());
     }
 
+    // Piszemy tylko ten plik, w którym coś się faktycznie zmieniło — inaczej
+    // dotknięcie samej opcji GTK kasowałoby ręczne komentarze w nietkniętym
+    // `daemon.toml` i podmieniało jego `.bak` bez powodu.
     let daemon_path = DaemonConfig::path();
     let gtk_path = GtkConfig::path();
-    write::save(&daemon_path, &daemon_text)?;
-    write::save(&gtk_path, &gtk_text)?;
+    let mut saved = Vec::new();
+    if !changes_daemon.is_empty() {
+        write::save(&daemon_path, &daemon_text)?;
+        saved.push(&daemon_path);
+    }
+    if !changes_gtk.is_empty() {
+        write::save(&gtk_path, &gtk_text)?;
+        saved.push(&gtk_path);
+    }
 
     println!("\nZapisano:");
-    println!("  {}", daemon_path.display());
-    println!("  {}", gtk_path.display());
-    println!("  model: {}", daemon.whisper.model);
+    for path in &saved {
+        println!("  {}", path.display());
+    }
+    if !changes_daemon.is_empty() {
+        println!("  model: {}", daemon.whisper.model);
+    }
     println!("\nWszystkie pola: diktate setup --advanced");
+    if let Some(hint) = &model_not_downloaded_hint {
+        println!("\n{hint}");
+    }
 
-    if let Some(pid) = diktate_proto::pidfile::running() {
-        println!(
-            "\nDaemon (proces {pid}) nadal chodzi ze starą konfiguracją. \
-             Bez restartu zmiany wyglądają, jakby nie działały:"
-        );
-        println!("  diktate-daemon --restart");
+    if !changes_daemon.is_empty() {
+        if let Some(pid) = diktate_proto::pidfile::running() {
+            println!(
+                "\nDaemon (proces {pid}) nadal chodzi ze starą konfiguracją. \
+                 Bez restartu zmiany wyglądają, jakby nie działały:"
+            );
+            println!("  diktate-daemon --restart");
+        }
     }
     Ok(())
 }
