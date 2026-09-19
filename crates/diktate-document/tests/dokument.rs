@@ -291,3 +291,127 @@ fn kotwica_po_wstawieniu_w_srodek_stoi_przed_doklejona_spacja() {
         "Ala zawsze".chars().count()
     );
 }
+
+// --- zastępowanie zaznaczenia (`docs/07#zaznaczenie-i-zastępowanie`) ---
+
+/// Zaznaczenie wyrażone pozycjami znakowymi — tak, jak podaje je widok.
+fn zaznaczenie(doc: &Document, od: usize, do_: usize) -> (Anchor, Anchor) {
+    (
+        doc.anchor_at_char(od).unwrap(),
+        doc.anchor_at_char(do_).unwrap(),
+    )
+}
+
+#[test]
+fn zastapienie_wymienia_zaznaczony_fragment() {
+    let (mut doc, _) = dokument_z("Ala ma kota");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+
+    doc.splice_segment(1, "psa", od, do_, &normalizacja());
+
+    assert_eq!(doc.text(), "Ala ma psa");
+}
+
+#[test]
+fn zastapienie_rozszerza_zaznaczenie_do_granic_slowa() {
+    // Użytkownik trafił myszą w środek wyrazu — poprawka i tak dotyczy
+    // całego słowa (`snap_to_word_boundary`).
+    let (mut doc, _) = dokument_z("Ala ma kota");
+    let (od, do_) = zaznaczenie(&doc, 8, 10);
+
+    doc.splice_segment(1, "psa", od, do_, &normalizacja());
+
+    assert_eq!(doc.text(), "Ala ma psa");
+}
+
+#[test]
+fn biale_znaki_na_brzegach_zostaja_poza_zastapieniem() {
+    let (mut doc, _) = dokument_z("Ala ma kota dziś");
+    // Zaznaczenie łapie spacje po obu stronach wyrazu.
+    let (od, do_) = zaznaczenie(&doc, 6, 12);
+
+    doc.splice_segment(1, "psa", od, do_, &normalizacja());
+
+    assert_eq!(doc.text(), "Ala ma psa dziś");
+}
+
+#[test]
+fn kropka_za_zaznaczeniem_przezywa_poprawke_jednego_slowa() {
+    let (mut doc, _) = dokument_z("Ala ma kota.");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+
+    doc.splice_segment(1, "psa", od, do_, &normalizacja());
+
+    assert_eq!(doc.text(), "Ala ma psa.");
+}
+
+#[test]
+fn nowy_tekst_z_wlasna_interpunkcja_pochlania_kropke_za_zaznaczeniem() {
+    let (mut doc, _) = dokument_z("Ala ma kota.");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+
+    doc.splice_segment(1, "psa!", od, do_, &normalizacja());
+
+    assert_eq!(doc.text(), "Ala ma psa!");
+}
+
+#[test]
+fn kotwica_po_zastapieniu_stoi_tuz_za_nowym_tekstem() {
+    let (mut doc, _) = dokument_z("Ala ma kota.");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+
+    let change = doc.splice_segment(1, "psa", od, do_, &normalizacja());
+
+    // Dyktowanie płynie dalej od poprawionego miejsca, przed ocalałą kropką.
+    assert_eq!(doc.char_position(change.anchor), 10);
+    assert_eq!(doc.char_at(change.anchor), Some('.'));
+}
+
+#[test]
+fn zastapienie_raportuje_dokladnie_to_co_widok_ma_zrobic_z_buforem() {
+    let (mut doc, _) = dokument_z("Ala ma kota");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+
+    let change = doc.splice_segment(1, "psa", od, do_, &normalizacja());
+
+    assert_eq!(change.at, 7);
+    assert_eq!(change.removed, 4);
+    assert_eq!(change.inserted, "psa");
+}
+
+#[test]
+fn jedno_cofniecie_zdejmuje_cale_zastapienie() {
+    let (mut doc, _) = dokument_z("Ala ma kota");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+    doc.splice_segment(1, "psa", od, do_, &normalizacja());
+
+    assert!(doc.undo());
+
+    assert_eq!(doc.text(), "Ala ma kota");
+}
+
+#[test]
+fn zaleglosc_wstawiona_w_kotwice_nie_uniewaznia_zaznaczenia() {
+    // Sedno `docs/07`: segment wypowiedziany przed zaznaczeniem dochodzi po
+    // nim i ląduje w kotwicy wstawiania. Zaznaczenie ma nadal wskazywać ten
+    // sam fragment.
+    let (mut doc, koniec) = dokument_z("Ala ma kota");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+
+    doc.insert_segment(1, " i psa", koniec, &bez_normalizacji());
+    doc.splice_segment(2, "chomika", od, do_, &normalizacja());
+
+    assert_eq!(doc.text(), "Ala ma chomika i psa");
+}
+
+#[test]
+fn zastapienie_skladane_z_logu_daje_ten_sam_dokument() {
+    let (mut doc, _) = dokument_z("Ala ma kota");
+    let (od, do_) = zaznaczenie(&doc, 7, 11);
+    doc.splice_segment(1, "psa", od, do_, &normalizacja());
+    let przed = doc.text();
+
+    doc.refold();
+
+    assert_eq!(doc.text(), przed);
+}

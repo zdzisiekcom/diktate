@@ -92,7 +92,8 @@ impl Anchor {
 pub struct Change {
     /// Pozycja znakowa, od której zaczyna się zmiana.
     pub at: usize,
-    /// Ile znaków usunąć od `at` w lewo (obcięty wielokropek).
+    /// Ile znaków usunąć, licząc od `at` w prawo: obcięty wielokropek przy
+    /// wstawianiu, zastępowany fragment przy zastąpieniu zaznaczenia.
     pub removed: usize,
     /// Co wstawić w miejsce `at` po usunięciu.
     pub inserted: String,
@@ -148,6 +149,14 @@ enum Op {
         from: Anchor,
         to: Anchor,
         literal: usize,
+    },
+    /// Zastąpienie zaznaczonego zakresu wypowiedzią. Zakres jest tu już po
+    /// normalizacji granic — do logu trafia dokładnie to, co widzi
+    /// użytkownik, więc powtórne złożenie nie liczy granic drugi raz.
+    Splice {
+        from: Anchor,
+        to: Anchor,
+        content: Vec<SpanContent>,
     },
 }
 
@@ -332,6 +341,118 @@ impl Document {
         }
     }
 
+    /// Zastępuje zaznaczony zakres wypowiedzią `seq` — operacja `Splice`
+    /// z `docs/03`.
+    ///
+    /// Normalizacja granic (`docs/07#granice-zaznaczenia`) jest **częścią tej
+    /// operacji**, nie osobnym krokiem: zaznaczenie rozszerza się do granic
+    /// słowa, białe znaki na brzegach zostają poza zastąpieniem, a kropka
+    /// stojąca tuż za zaznaczeniem przeżywa poprawkę jednego słowa. Dzięki
+    /// temu do logu trafia już policzony zakres i cofnięcie zdejmuje całość
+    /// jednym ruchem.
+    pub fn splice_segment(
+        &mut self,
+        seq: u64,
+        text: &str,
+        from: Anchor,
+        to: Anchor,
+        normalization: &Normalization,
+    ) -> Change {
+        let (start, end) = self.replacement_range(from, to, text);
+        let from = self.anchor_at_char(start).unwrap_or(Anchor::Start);
+        let to = self
+            .anchor_at_char(end)
+            .unwrap_or_else(|| self.end_anchor());
+
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        self.segments.insert(seq, chars);
+
+        let mut inserted = String::new();
+        let mut content = Vec::new();
+        let mut segment_index = 0;
+
+        // Spacje liczymy względem sąsiadów **po** wycięciu zakresu: przed nim
+        // stoi znak sprzed `start`, za nim znak spod `end`.
+        if self.needs_space_before(from, 0, text, normalization) {
+            content.push(self.literal_content(" "));
+            inserted.push(' ');
+            segment_index = 1;
+        }
+        content.push(SpanContent {
+            source: Source::Segment(seq),
+            range: 0..len,
+        });
+        inserted.push_str(text);
+        if self.needs_space_after(to, text, normalization) {
+            content.push(self.literal_content(" "));
+            inserted.push(' ');
+        }
+
+        let created = self.push_op(Op::Splice { from, to, content });
+        let anchor = match created.get(segment_index) {
+            Some(&id) => Anchor::In {
+                span: id,
+                offset: len,
+            },
+            // Pusta wypowiedź nie utworzyła spanu — kotwica ląduje tam, gdzie
+            // zaczynało się zaznaczenie.
+            None => self.anchor_at_char(start).unwrap_or(Anchor::Start),
+        };
+        Change {
+            at: start,
+            removed: end - start,
+            inserted,
+            anchor,
+        }
+    }
+
+    /// Zakres znakowy, który faktycznie zniknie — zaznaczenie użytkownika po
+    /// normalizacji granic (`docs/07#granice-zaznaczenia`).
+    fn replacement_range(&self, from: Anchor, to: Anchor, text: &str) -> (usize, usize) {
+        let chars: Vec<char> = self.chars().collect();
+        let a = self.position_of(from);
+        let b = self.position_of(to);
+        let (mut start, mut end) = (a.min(b), a.max(b));
+
+        // Zaznaczenie obejmujące część słowa rozszerzamy do jego granic:
+        // precyzja co do znaku jest przy poprawce głosowej niemal zawsze
+        // przypadkiem, nie intencją.
+        while start > 0
+            && is_word_char(chars[start - 1])
+            && matches!(chars.get(start), Some(&c) if is_word_char(c))
+        {
+            start -= 1;
+        }
+        while end < chars.len()
+            && is_word_char(chars[end])
+            && end > 0
+            && is_word_char(chars[end - 1])
+        {
+            end += 1;
+        }
+
+        // Białe znaki na brzegach zostają poza zastąpieniem — nowy tekst
+        // wchodzi między te same spacje, co stary.
+        while start < end && chars[start].is_whitespace() {
+            start += 1;
+        }
+        while end > start && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+
+        // Interpunkcja tuż za zaznaczeniem przeżywa poprawkę — inaczej
+        // podyktowanie jednego słowa gubiłoby kropkę zdania. Znika tylko
+        // wtedy, gdy nowy tekst przynosi własną.
+        if text.ends_with(NO_SPACE_BEFORE) {
+            while end < chars.len() && NO_SPACE_BEFORE.contains(&chars[end]) {
+                end += 1;
+            }
+        }
+
+        (start, end)
+    }
+
     /// Edycja klawiaturą: zastępuje zakres tekstem. Trafia do tego samego
     /// logu co dyktowanie, więc `Ctrl+Z` cofa jedno i drugie tym samym
     /// mechanizmem.
@@ -402,31 +523,39 @@ impl Document {
                 self.insert_spans(index, content)
             }
             Op::SetText { from, to, literal } => {
-                // Tniemy najpierw na końcu zakresu: cięcie na pozycji
-                // późniejszej nie rusza niczego przed nią, więc kotwica
-                // `from` pozostaje ważna. W odwrotnej kolejności `to`
-                // wskazywałoby już na span, którego nie ma.
-                let end = self.split_at(*to);
-                let before = self.spans.len();
-                let start = self.split_at(*from);
-                // Cięcie na początku zakresu dokłada span przed jego końcem,
-                // więc indeks końca trzeba o tyle samo przesunąć.
-                let end = end + (self.spans.len() - before);
-                let (start, end) = (start.min(end), start.max(end));
-                self.spans.drain(start..end);
                 let text_len = self.literals[*literal].len();
-                if text_len == 0 {
-                    return Vec::new();
-                }
-                self.insert_spans(
-                    start,
-                    &[SpanContent {
+                let content = if text_len == 0 {
+                    Vec::new()
+                } else {
+                    vec![SpanContent {
                         source: Source::Literal(*literal),
                         range: 0..text_len,
-                    }],
-                )
+                    }]
+                };
+                self.replace_range(*from, *to, &content)
+            }
+            Op::Splice { from, to, content } => {
+                let content = content.clone();
+                self.replace_range(*from, *to, &content)
             }
         }
+    }
+
+    /// Wycina zakres między kotwicami i wstawia w jego miejsce nową treść.
+    ///
+    /// Tniemy najpierw na końcu zakresu: cięcie na pozycji późniejszej nie
+    /// rusza niczego przed nią, więc kotwica `from` pozostaje ważna.
+    /// W odwrotnej kolejności `to` wskazywałoby już na span, którego nie ma.
+    fn replace_range(&mut self, from: Anchor, to: Anchor, content: &[SpanContent]) -> Vec<SpanId> {
+        let end = self.split_at(to);
+        let before = self.spans.len();
+        let start = self.split_at(from);
+        // Cięcie na początku zakresu dokłada span przed jego końcem, więc
+        // indeks końca trzeba o tyle samo przesunąć.
+        let end = end + (self.spans.len() - before);
+        let (start, end) = (start.min(end), start.max(end));
+        self.spans.drain(start..end);
+        self.insert_spans(start, content)
     }
 
     /// Zamienia kotwicę na indeks w liście spanów, tnąc span, jeśli kotwica
@@ -631,4 +760,10 @@ impl Document {
         // dokumentu nie ma czego rozdzielać.
         matches!(self.char_at(at), Some(c) if c.is_alphanumeric())
     }
+}
+
+/// Znak należący do słowa — litera, cyfra albo łącznik wewnątrzwyrazowy.
+/// Po takich znakach nie wolno przeciąć zaznaczenia w połowie wyrazu.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '-' || c == '\''
 }

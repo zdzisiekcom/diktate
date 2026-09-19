@@ -16,9 +16,18 @@
 //! `docs/07-zachowanie-dyktowania.md`: przesuwa się za wstawionym tekstem
 //! i za karetką przesuniętą przez użytkownika, ale **nie rusza się przy
 //! niepustym zaznaczeniu** — zaznaczenie pamięta miejsce sprzed siebie.
+//!
+//! Niepuste zaznaczenie znaczy „następną wypowiedzią zastąp to" i uzbraja się
+//! samo. O tym, czy przychodzący segment zastępuje, czy tylko dopływa,
+//! rozstrzyga **oś czasu audio**, nie kolejność przybycia: wypowiedź, która
+//! padła przed uzbrojeniem, a dotarła po nim (bo GPU nie nadążał), wchodzi
+//! w kotwicę wstawiania i zostawia zaznaczenie uzbrojone. Bez tej reguły
+//! poprawka bywa zjadana przez zdanie sprzed niej — błąd prototypu opisany
+//! w `docs/07#rozstrzyganie-po-osi-czasu-audio`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Instant;
 
 use diktate_config::DictationConfig;
 use diktate_document::{Anchor, Document, Normalization};
@@ -36,8 +45,34 @@ pub struct DocumentView {
     /// Podniesiona, gdy to my zmieniamy bufor. Bez tego nasza własna zmiana
     /// wróciłaby przez sygnały edycji i zapisała się w logu drugi raz.
     applying: Cell<bool>,
+    /// Uzbrojone zastąpienie — zapamiętane zaznaczenie wraz z momentem
+    /// powstania na osi czasu audio.
+    replace: RefCell<Option<Armed>>,
+    /// Początek bieżącej sesji audio w czasie ściennym. Daemon liczy
+    /// `audio_start_ms` od startu nagrywania, więc tylko stąd wiemy, którą
+    /// chwilę osi czasu audio widzi użytkownik, gdy zaznacza tekst.
+    audio_origin: Cell<Option<Instant>>,
+    /// Numer sesji audio. Każde nagranie zaczyna oś czasu od zera, więc
+    /// samo `at_ms` nie wystarcza do porównania między sesjami.
+    session_epoch: Cell<u64>,
+    /// Powiadomienie dla okna: zastąpienie uzbrojone albo zwolnione.
+    on_armed: RefCell<Option<ArmedNotify>>,
     normalization: Normalization,
     config: DictationConfig,
+}
+
+/// Powiadomienie okna o zmianie uzbrojenia zastąpienia.
+type ArmedNotify = Box<dyn Fn(bool)>;
+
+/// Zapamiętane zaznaczenie czekające na wypowiedź, która je zastąpi.
+#[derive(Debug, Clone, Copy)]
+struct Armed {
+    from: Anchor,
+    to: Anchor,
+    /// Sesja audio, w której zaznaczenie powstało.
+    epoch: u64,
+    /// `replace_armed_at` — moment uzbrojenia na osi czasu audio sesji.
+    at_ms: u64,
 }
 
 impl DocumentView {
@@ -58,6 +93,10 @@ impl DocumentView {
             view: view.clone(),
             insert_anchor: Cell::new(Anchor::Start),
             applying: Cell::new(false),
+            replace: RefCell::new(None),
+            audio_origin: Cell::new(None),
+            session_epoch: Cell::new(0),
+            on_armed: RefCell::new(None),
             normalization,
             config,
         });
@@ -77,49 +116,61 @@ impl DocumentView {
             for_cursor.follow_caret();
         });
 
+        // Zaznaczenie uzbraja zastąpienie samo, więc musimy widzieć każdy ruch
+        // obu znaczników — `has-selection` nie drgnie przy zmianie zakresu
+        // w trakcie przeciągania, a to ono wyznacza moment uzbrojenia.
+        let for_selection = Rc::clone(&this);
+        buffer.connect_mark_set(move |buffer, _, mark| {
+            let name = mark.name();
+            let name = name.as_deref();
+            if name == Some("insert") || name == Some("selection_bound") {
+                let _ = buffer;
+                for_selection.sync_selection();
+            }
+        });
+
         this
     }
 
-    /// Wstawia wypowiedź w kotwicę wstawiania i nakłada wynikłą zmianę na
-    /// bufor.
+    /// Przyjmuje wypowiedź: zastępuje nią uzbrojone zaznaczenie albo wstawia
+    /// ją w kotwicę wstawiania. Rozstrzyga oś czasu audio, nie kolejność
+    /// przybycia (`docs/07`).
     pub fn insert_segment(&self, segment: &SegmentAdded) {
-        // `insert_at_cursor = false` przywraca zachowanie „zawsze na koniec"
-        // — ta sama ścieżka kodu, tylko inna kotwica.
-        let at = if self.config.insert_at_cursor {
-            self.insert_anchor.get()
-        } else {
-            self.document.borrow().end_anchor()
-        };
-        let change = self.document.borrow_mut().insert_segment(
-            segment.seq,
-            &segment.text,
-            at,
-            &self.normalization,
-        );
-        self.insert_anchor.set(change.anchor);
-
-        let follow = self.insertion_point_visible(change.at);
-        self.applying.set(true);
-        let mut at = self.buffer.iter_at_offset(change.at as i32);
-        if change.removed > 0 {
-            let mut end = self
-                .buffer
-                .iter_at_offset((change.at + change.removed) as i32);
-            self.buffer.delete(&mut at, &mut end);
+        match self.armed_for(segment.audio_start_ms) {
+            Some(armed) => self.apply_splice(segment, armed),
+            None => self.apply_insert(segment),
         }
-        self.buffer.insert(&mut at, &change.inserted);
-        // Karetka idzie tam, gdzie stanęła kotwica — dyktowanie płynie dalej
-        // od tego miejsca.
-        let caret = self
-            .buffer
-            .iter_at_offset(self.document.borrow().char_position(change.anchor) as i32);
+    }
+
+    /// Zaczyna nową sesję audio — jej oś czasu rusza od zera. Wywoływane, gdy
+    /// daemon potwierdzi start nagrywania.
+    pub fn begin_audio_session(&self) {
+        self.session_epoch.set(self.session_epoch.get() + 1);
+        self.audio_origin.set(Some(Instant::now()));
+    }
+
+    /// Podpina powiadomienie o uzbrojeniu zastąpienia — okno pokazuje wtedy
+    /// „zastępuję…" i wyróżnia zaznaczenie.
+    pub fn connect_armed<F: Fn(bool) + 'static>(&self, notify: F) {
+        *self.on_armed.borrow_mut() = Some(Box::new(notify));
+    }
+
+    /// Czy jakieś zaznaczenie czeka na zastąpienie.
+    pub fn is_armed(&self) -> bool {
+        self.replace.borrow().is_some()
+    }
+
+    /// `Escape`: znosi zaznaczenie i wraca do zwykłego wstawiania, bez żadnej
+    /// zmiany w dokumencie. `false`, gdy nie było czego znosić.
+    pub fn cancel_replace(&self) -> bool {
+        if !self.is_armed() {
+            return false;
+        }
+        // Samo zdjęcie zaznaczenia w buforze przejdzie przez `sync_selection`
+        // i rozbroi zastąpienie — nie robimy tego drugi raz ręcznie.
+        let caret = self.buffer.iter_at_offset(self.buffer.cursor_position());
         self.buffer.place_cursor(&caret);
-        self.applying.set(false);
-
-        if follow && self.config.follow_caret {
-            self.view
-                .scroll_to_mark(&self.buffer.get_insert(), 0.0, false, 0.0, 0.0);
-        }
+        true
     }
 
     /// Cofa ostatnią operację — dyktowanie i pisanie jednym mechanizmem.
@@ -146,6 +197,164 @@ impl DocumentView {
 
     // --- wnętrze ---
 
+    /// Zaznaczenie uzbrojone dla tej wypowiedzi — albo `None`, gdy segment
+    /// ma tylko dopłynąć w kotwicę wstawiania.
+    fn armed_for(&self, audio_start_ms: u64) -> Option<Armed> {
+        let armed = (*self.replace.borrow())?;
+        replaces(
+            armed.epoch,
+            armed.at_ms,
+            self.session_epoch.get(),
+            audio_start_ms,
+        )
+        .then_some(armed)
+    }
+
+    /// Chwila na osi czasu audio bieżącej sesji. Poza nagrywaniem to zero —
+    /// sesja i tak zacznie się od nowa, a `epoch` to wyłapie.
+    fn audio_now_ms(&self) -> u64 {
+        match self.audio_origin.get() {
+            Some(origin) => origin.elapsed().as_millis() as u64,
+            None => 0,
+        }
+    }
+
+    /// Wstawienie w kotwicę. Gdy zastąpienie czeka uzbrojone, wypowiedź
+    /// jest zaległością sprzed zaznaczenia — po nałożeniu zmiany odtwarzamy
+    /// zaznaczenie z kotwic, bo offsety w buforze właśnie się przesunęły.
+    fn apply_insert(&self, segment: &SegmentAdded) {
+        // `insert_at_cursor = false` przywraca zachowanie „zawsze na koniec"
+        // — ta sama ścieżka kodu, tylko inna kotwica.
+        let at = if self.config.insert_at_cursor {
+            self.insert_anchor.get()
+        } else {
+            self.document.borrow().end_anchor()
+        };
+        let change = self.document.borrow_mut().insert_segment(
+            segment.seq,
+            &segment.text,
+            at,
+            &self.normalization,
+        );
+        self.insert_anchor.set(change.anchor);
+
+        let armed = *self.replace.borrow();
+        let follow = self.insertion_point_visible(change.at);
+        self.applying.set(true);
+        self.splice_buffer(&change);
+        match armed {
+            // Zaznaczenie zostaje uzbrojone — zaległy segment go nie
+            // unieważnia (`docs/07`), a karetka nie ma prawa go zerwać.
+            Some(armed) => self.select(armed.from, armed.to),
+            None => self.place_caret(change.anchor),
+        }
+        self.applying.set(false);
+
+        if follow && self.config.follow_caret {
+            self.view
+                .scroll_to_mark(&self.buffer.get_insert(), 0.0, false, 0.0, 0.0);
+        }
+    }
+
+    /// Zastąpienie zaznaczenia. Jedna wypowiedź zjada dokładnie jedno
+    /// zaznaczenie — po nim tryb wraca do wstawiania, a dyktowanie płynie
+    /// dalej od poprawionego miejsca (`gtk.replace.mode = "one_utterance"`).
+    fn apply_splice(&self, segment: &SegmentAdded, armed: Armed) {
+        let change = self.document.borrow_mut().splice_segment(
+            segment.seq,
+            &segment.text,
+            armed.from,
+            armed.to,
+            &self.normalization,
+        );
+        self.insert_anchor.set(change.anchor);
+
+        let follow = self.insertion_point_visible(change.at);
+        self.applying.set(true);
+        self.splice_buffer(&change);
+        self.place_caret(change.anchor);
+        self.applying.set(false);
+        self.disarm();
+
+        if follow && self.config.follow_caret {
+            self.view
+                .scroll_to_mark(&self.buffer.get_insert(), 0.0, false, 0.0, 0.0);
+        }
+    }
+
+    /// Nakłada jedną lokalną zmianę na bufor. Wołane wyłącznie z podniesioną
+    /// flagą `applying`.
+    fn splice_buffer(&self, change: &diktate_document::Change) {
+        let mut at = self.buffer.iter_at_offset(change.at as i32);
+        if change.removed > 0 {
+            let mut end = self
+                .buffer
+                .iter_at_offset((change.at + change.removed) as i32);
+            self.buffer.delete(&mut at, &mut end);
+        }
+        self.buffer.insert(&mut at, &change.inserted);
+    }
+
+    /// Karetka idzie tam, gdzie stanęła kotwica — dyktowanie płynie dalej od
+    /// tego miejsca.
+    fn place_caret(&self, anchor: Anchor) {
+        let position = self.document.borrow().char_position(anchor);
+        let caret = self.buffer.iter_at_offset(position as i32);
+        self.buffer.place_cursor(&caret);
+    }
+
+    fn select(&self, from: Anchor, to: Anchor) {
+        let (start, end) = {
+            let document = self.document.borrow();
+            (
+                document.char_position(from) as i32,
+                document.char_position(to) as i32,
+            )
+        };
+        self.buffer.select_range(
+            &self.buffer.iter_at_offset(end),
+            &self.buffer.iter_at_offset(start),
+        );
+    }
+
+    /// Zapamiętuje zaznaczenie jako uzbrojone zastąpienie albo je zwalnia.
+    /// Moment uzbrojenia to `replace_armed_at` — chwila, w której powstało
+    /// **to** zaznaczenie, także po poprawieniu zakresu myszą.
+    fn sync_selection(&self) {
+        if self.applying.get() {
+            return;
+        }
+        let armed = self.buffer.selection_bounds().and_then(|(start, end)| {
+            let document = self.document.borrow();
+            let from = document.anchor_at_char(start.offset() as usize)?;
+            let to = document.anchor_at_char(end.offset() as usize)?;
+            Some(Armed {
+                from,
+                to,
+                epoch: self.session_epoch.get(),
+                at_ms: self.audio_now_ms(),
+            })
+        });
+        let was = self.is_armed();
+        *self.replace.borrow_mut() = armed;
+        let is = self.is_armed();
+        if was != is {
+            self.notify_armed(is);
+        }
+    }
+
+    fn disarm(&self) {
+        if self.replace.borrow_mut().take().is_some() {
+            self.notify_armed(false);
+        }
+    }
+
+    fn notify_armed(&self, armed: bool) {
+        if let Some(notify) = self.on_armed.borrow().as_ref() {
+            notify(armed);
+        }
+    }
+
     /// Po cofnięciu bufor odtwarzamy w całości: cofnięcie jest rzadkie,
     /// a jego wynik może sięgać dowolnie daleko w tekście.
     fn rebuild(&self) {
@@ -160,6 +369,9 @@ impl DocumentView {
         self.buffer.set_text(&text);
         self.applying.set(false);
         self.insert_anchor.set(anchor);
+        // Bufor przerysowany w całości nie ma już zaznaczenia, a zapamiętane
+        // kotwice wskazują stan sprzed cofnięcia.
+        self.disarm();
     }
 
     fn mirror_keyboard_insert(&self, offset: usize, text: &str) {
@@ -210,5 +422,137 @@ impl DocumentView {
         let visible = self.view.visible_rect();
         location.y() + location.height() >= visible.y()
             && location.y() <= visible.y() + visible.height()
+    }
+}
+
+/// Czy wypowiedź zaczynająca się w `audio_start_ms` zastępuje zaznaczenie
+/// uzbrojone w `armed_at_ms` — reguła rozstrzygania z `docs/07`.
+///
+/// Zaznaczenie z wcześniejszej sesji audio zastępuje zawsze: nowa sesja liczy
+/// oś czasu od zera, więc każda jej wypowiedź padła po uzbrojeniu, choćby jej
+/// `audio_start_ms` był mniejszy od zapamiętanego.
+fn replaces(armed_epoch: u64, armed_at_ms: u64, session_epoch: u64, audio_start_ms: u64) -> bool {
+    let threshold = if armed_epoch < session_epoch {
+        0
+    } else {
+        armed_at_ms
+    };
+    audio_start_ms >= threshold
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wypowiedz_po_uzbrojeniu_zastepuje_zaznaczenie() {
+        assert!(replaces(1, 5_000, 1, 5_200));
+    }
+
+    #[test]
+    fn zaleglosc_sprzed_uzbrojenia_nie_zjada_zaznaczenia() {
+        // Sedno reguły: segment padł dziesięć sekund temu, a dotarł dopiero
+        // teraz. Prototyp zjadał nim zaznaczenie — my go wstawiamy.
+        assert!(!replaces(1, 12_000, 1, 2_000));
+    }
+
+    #[test]
+    fn wypowiedz_dokladnie_w_momencie_uzbrojenia_zastepuje() {
+        // Granica należy do zastępowania: mowa zaczęta w tej samej chwili
+        // jest już poprawką, a nie zaległością.
+        assert!(replaces(1, 5_000, 1, 5_000));
+    }
+
+    #[test]
+    fn zaznaczenie_sprzed_nowego_nagrania_zastepuje_pierwsza_wypowiedzia() {
+        // Użytkownik zaznaczył tekst po zatrzymaniu nagrywania i zaczął mówić
+        // od nowa. Nowa sesja liczy oś czasu od zera — zapamiętane 12 s nie
+        // ma z nią nic wspólnego.
+        assert!(replaces(1, 12_000, 2, 0));
+    }
+
+    // --- sklejka z buforem ---
+    //
+    // Reguła rozstrzygania i sama operacja `Splice` mają testy bez GTK, ale
+    // nie pokrywają tego, co jest między nimi: czy zaznaczenie zrobione
+    // w buforze uzbraja zastąpienie i czy zaległa wypowiedź nie zrywa go przy
+    // okazji przesunięcia karetki. Błąd siedział dokładnie w tej warstwie,
+    // więc ma własne testy — wymagają sesji graficznej, stąd `#[ignore]`:
+    // `cargo test -p diktate-gtk -- --ignored`.
+
+    fn segment(seq: u64, text: &str, audio_start_ms: u64) -> SegmentAdded {
+        SegmentAdded {
+            seq,
+            text: text.to_string(),
+            audio_start_ms,
+            audio_end_ms: audio_start_ms + 1_000,
+        }
+    }
+
+    fn przygotuj() -> Rc<DocumentView> {
+        let view = TextView::new();
+        DocumentView::attach(&view, DictationConfig::default())
+    }
+
+    /// Zaznacza fragment, upewniając się wpierw, że oś czasu audio zdążyła
+    /// ruszyć. `replace_armed_at` bierze się z realnego zegara, a bez tej
+    /// zwłoki zaległość z `audio_start_ms = 0` wypadałaby „po uzbrojeniu"
+    /// i test mierzyłby szybkość maszyny, nie regułę.
+    fn zaznacz(document: &DocumentView, od: i32, do_: i32) {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let buffer = &document.buffer;
+        buffer.select_range(&buffer.iter_at_offset(do_), &buffer.iter_at_offset(od));
+    }
+
+    fn tekst(document: &DocumentView) -> String {
+        let buffer = &document.buffer;
+        buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string()
+    }
+
+    /// Trzy scenariusze w jednym teście, bo GTK wolno zainicjować tylko raz
+    /// i tylko z jednego wątku, a harness dla każdego testu tworzy nowy.
+    #[test]
+    #[ignore = "wymaga sesji graficznej"]
+    fn zastepowanie_zaznaczenia_w_buforze() {
+        gtk4::init().expect("sesja graficzna");
+
+        // Zaznaczenie uzbraja zastąpienie, wypowiedź je wymienia.
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "Ala ma kota", 0));
+        assert_eq!(tekst(&document), "Ala ma kota");
+        zaznacz(&document, 7, 11);
+        assert!(document.is_armed(), "zaznaczenie ma uzbrajać zastąpienie");
+        document.insert_segment(&segment(1, "psa", 5_000));
+        assert_eq!(tekst(&document), "Ala ma psa");
+        assert!(
+            !document.is_armed(),
+            "po zastąpieniu tryb wraca do wstawiania"
+        );
+
+        // Zaległość sprzed uzbrojenia dopisuje się i zostawia zaznaczenie.
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "Ala ma kota", 0));
+        zaznacz(&document, 7, 11);
+        document.insert_segment(&segment(1, "i psa", 0));
+        assert_eq!(tekst(&document), "Ala ma kota i psa");
+        assert!(
+            document.is_armed(),
+            "zaległość nie ma prawa unieważnić zaznaczenia"
+        );
+        document.insert_segment(&segment(2, "chomika", 5_000));
+        assert_eq!(tekst(&document), "Ala ma chomika i psa");
+
+        // Escape znosi uzbrojenie, dokument zostaje nietknięty.
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "Ala ma kota", 0));
+        zaznacz(&document, 7, 11);
+        assert!(document.cancel_replace());
+        assert!(!document.is_armed());
+        assert_eq!(tekst(&document), "Ala ma kota");
     }
 }

@@ -65,6 +65,13 @@ const ACTION_ACCEPT: &str = "accept";
 /// Skrót akcji „OK" — działa wyłącznie w oknie aplikacji, nie globalnie.
 const ACCEPT_ACCEL: &str = "<Super>c";
 
+/// Klasa widoku tekstu podnoszona na czas uzbrojonego zastąpienia.
+const REPLACE_ARMED_CLASS: &str = "replace-armed";
+
+/// Jedyny własny styl okna: zaznaczenie czekające na zastąpienie ma wyglądać
+/// inaczej niż zwykłe. Barwy nazwane pochodzą z Adwaity i idą za motywem.
+const REPLACE_CSS: &str = "textview.replace-armed text selection {\n    background-color: @warning_bg_color;\n    color: @warning_fg_color;\n}\n";
+
 fn main() -> gtk4::glib::ExitCode {
     // Polecenia administracyjne obsługujemy przed uruchomieniem GTK —
     // rejestracja skrótu nie potrzebuje okna ani serwera wyświetlania.
@@ -196,6 +203,18 @@ fn backlog_phrase(n: u32) -> String {
 /// Tekst podtytułu na podstawie stanu sesji i liczby zaległości. Wywoływana
 /// wyłącznie z obsługi `Incoming::State` — podtytuł nigdy nie jest zgadywany
 /// na podstawie samego kliknięcia przycisku.
+/// Podtytuł składany z dwóch niezależnych rzeczy: stanu sesji i tego, czy
+/// zaznaczenie czeka na zastąpienie. Uzbrojenie idzie na początek, bo jest
+/// stanem chwilowym — użytkownik ma je zobaczyć, zanim zacznie mówić.
+fn subtitle_with_replace(state: SessionState, backlog: u32, armed: bool) -> String {
+    let base = subtitle_for_state(state, backlog);
+    if armed {
+        format!("Zastępuję… · {base}")
+    } else {
+        base
+    }
+}
+
 fn subtitle_for_state(state: SessionState, backlog: u32) -> String {
     match (state, backlog) {
         (SessionState::Idle, 0) => "Gotowe".to_string(),
@@ -379,6 +398,9 @@ struct Ui {
     level_bar: LevelBar,
     record_button: ToggleButton,
     document: Rc<DocumentView>,
+    /// Stan sesji widziany ostatnio — podtytuł składa się z niego i z
+    /// uzbrojenia zastąpienia, więc żadne z dwóch nie może go zamazać.
+    status: Rc<Cell<(SessionState, u32)>>,
     tray: Option<TrayHandle>,
     show_level_meter: bool,
     gate: Rc<Gate>,
@@ -459,6 +481,7 @@ impl Ui {
             level_bar,
             record_button,
             document,
+            status,
             tray,
             show_level_meter,
             gate,
@@ -487,6 +510,7 @@ impl Ui {
         let backlog_spinner_for_incoming = backlog_spinner.clone();
         let level_bar_for_incoming = level_bar.clone();
         let record_button_for_incoming = record_button.clone();
+        let status_for_incoming = Rc::clone(&status);
         let gate_for_incoming = Rc::clone(&gate);
         let accept_for_incoming = Rc::clone(&accept);
         gtk4::glib::spawn_future_local(async move {
@@ -499,7 +523,19 @@ impl Ui {
                         level_bar_for_incoming.set_value(meter_value(rms));
                     }
                     Incoming::State { state, backlog } => {
-                        window_title_for_incoming.set_subtitle(&subtitle_for_state(state, backlog));
+                        let (poprzedni, _) = status_for_incoming.get();
+                        status_for_incoming.set((state, backlog));
+                        // Nowe nagranie zaczyna oś czasu audio od zera —
+                        // model dokumentu musi wiedzieć, od kiedy ją liczyć.
+                        if state == SessionState::Recording && poprzedni != SessionState::Recording
+                        {
+                            document_for_incoming.begin_audio_session();
+                        }
+                        window_title_for_incoming.set_subtitle(&subtitle_with_replace(
+                            state,
+                            backlog,
+                            document_for_incoming.is_armed(),
+                        ));
                         if let Some(handle) = &tray {
                             handle.update(|tray| {
                                 tray.set_state(state == SessionState::Recording, backlog)
@@ -692,6 +728,35 @@ fn build_ui(app: &Application) {
     // a nie źródłem prawdy.
     let document = DocumentView::attach(&text_view, config.dictation.clone());
 
+    // Stan sesji trzymany osobno: podtytuł powstaje z niego i z uzbrojenia
+    // zastąpienia, a te dwie rzeczy zmieniają się niezależnie.
+    let status = Rc::new(Cell::new((SessionState::Idle, 0u32)));
+
+    // Uzbrojone zaznaczenie widać dwiema drogami: innym kolorem samego
+    // zaznaczenia i słowem „zastępuję…" w podtytule (docs/07). Kolory biorą
+    // się z nazwanych barw Adwaity, więc motyw nadal decyduje.
+    if let Some(display) = gtk4::gdk::Display::default() {
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_data(REPLACE_CSS);
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+    let text_view_for_armed = text_view.clone();
+    let window_title_for_armed = window_title.clone();
+    let status_for_armed = Rc::clone(&status);
+    document.connect_armed(move |armed| {
+        if armed {
+            text_view_for_armed.add_css_class(REPLACE_ARMED_CLASS);
+        } else {
+            text_view_for_armed.remove_css_class(REPLACE_ARMED_CLASS);
+        }
+        let (state, backlog) = status_for_armed.get();
+        window_title_for_armed.set_subtitle(&subtitle_with_replace(state, backlog, armed));
+    });
+
     let buffer = text_view.buffer();
     let stack_for_buffer = stack.clone();
     buffer.connect_changed(move |buffer| {
@@ -805,6 +870,7 @@ fn build_ui(app: &Application) {
         level_bar: level_bar.clone(),
         record_button: record_button.clone(),
         document: Rc::clone(&document),
+        status: Rc::clone(&status),
         tray: tray_handle,
         show_level_meter: config.window.show_level_meter,
         gate,
@@ -833,6 +899,13 @@ fn build_ui(app: &Application) {
             }
             gtk4::gdk::Key::Z | gtk4::gdk::Key::z if ctrl && shift => {
                 document_for_keys.redo();
+                gtk4::glib::Propagation::Stop
+            }
+            // Escape znosi zaznaczenie i wraca do zwykłego wstawiania, bez
+            // żadnej zmiany w dokumencie (docs/07). Gdy nic nie jest
+            // uzbrojone, klawisz idzie dalej — okno może mieć z nim swoje
+            // sprawy.
+            gtk4::gdk::Key::Escape if document_for_keys.cancel_replace() => {
                 gtk4::glib::Propagation::Stop
             }
             _ => gtk4::glib::Propagation::Proceed,
@@ -965,7 +1038,10 @@ mod tests {
         let gate = Gate::default();
         assert!(!gate.request());
         gate.lost();
-        assert!(!gate.pending(), "odłożone żądanie przepada razem z daemonem");
+        assert!(
+            !gate.pending(),
+            "odłożone żądanie przepada razem z daemonem"
+        );
         // Nie obiecujemy nagrania, którego nie będzie — nikt nie wraca po
         // to żądanie, bo ponowne łączenie jeszcze nie istnieje.
         assert!(!gate.request());
@@ -1032,6 +1108,22 @@ mod tests {
         assert_eq!(backlog_phrase(22), "22 wypowiedzi");
         assert_eq!(backlog_phrase(23), "23 wypowiedzi");
         assert_eq!(backlog_phrase(25), "25 wypowiedzi");
+    }
+
+    #[test]
+    fn uzbrojone_zastapienie_widac_w_podtytule() {
+        assert_eq!(
+            subtitle_with_replace(SessionState::Recording, 0, true),
+            "Zastępuję… · Nagrywam"
+        );
+    }
+
+    #[test]
+    fn bez_uzbrojenia_podtytul_zostaje_taki_jak_byl() {
+        assert_eq!(
+            subtitle_with_replace(SessionState::Idle, 0, false),
+            subtitle_for_state(SessionState::Idle, 0)
+        );
     }
 
     #[test]
