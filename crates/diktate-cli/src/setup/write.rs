@@ -11,9 +11,17 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use diktate_config::{DaemonConfig, GtkConfig};
 
+/// Fragment pierwszej linii `daemon_toml`/`gtk_toml`. Po nim `save`
+/// rozpoznaje, czy plik docelowy jest wynikiem poprzedniego przebiegu
+/// kreatora — taki plik da się odtworzyć z bieżącej konfiguracji w każdej
+/// chwili, więc nie szkodzi podmienić jego `.bak`. Plik bez tego nagłówka
+/// jest napisany ręcznie, a jego treść nie do odtworzenia — `.bak` z jego
+/// zawartością musi przetrwać kolejne przebiegi kreatora.
+const GENERATED_MARKER: &str = "wygenerowane przez `diktate setup`.";
+
 pub fn daemon_toml(cfg: &DaemonConfig) -> String {
     let mut out = String::new();
-    out.push_str("# daemon.toml — wygenerowane przez `diktate setup`.\n");
+    out.push_str(&format!("# daemon.toml — {GENERATED_MARKER}\n"));
     out.push_str("# Opis wszystkich pól: docs/04-konfiguracja.md\n\n");
 
     out.push_str("[audio]\n");
@@ -46,7 +54,7 @@ pub fn daemon_toml(cfg: &DaemonConfig) -> String {
 
 pub fn gtk_toml(cfg: &GtkConfig) -> String {
     let mut out = String::new();
-    out.push_str("# gtk.toml — wygenerowane przez `diktate setup`.\n");
+    out.push_str(&format!("# gtk.toml — {GENERATED_MARKER}\n"));
     out.push_str("# Opis wszystkich pól: docs/04-konfiguracja.md\n\n");
 
     out.push_str("[window]\n");
@@ -96,6 +104,12 @@ fn flag(name: &str, value: bool, description: &str) -> String {
 /// Nazwa pliku tymczasowego niesie numer procesu (`std::process::id()`),
 /// żeby dwa równoległe uruchomienia kreatora nie pisały do tej samej
 /// nazwy i nie nadpisały sobie zawartości przed `rename`.
+///
+/// `.bak` dostaje nową treść tylko wtedy, gdy plik zastępowany nie jest
+/// wynikiem wcześniejszego przebiegu kreatora (`GENERATED_MARKER`) — inaczej
+/// drugie uruchomienie kreatora podmieniłoby kopię pliku napisanego ręcznie
+/// na kopię pliku, który sam wygenerował, i obietnica „masz gdzie wrócić”
+/// z `docs/04` byłaby po dwóch przebiegach pusta.
 pub fn save(path: &Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -107,8 +121,18 @@ pub fn save(path: &Path, text: &str) -> Result<()> {
                 .map(|e| format!("{}.bak", e.to_string_lossy()))
                 .unwrap_or_else(|| "bak".to_string()),
         );
-        std::fs::copy(path, &bak)
-            .with_context(|| format!("nie udało się zapisać kopii {}", bak.display()))?;
+        let target_is_generated = std::fs::read_to_string(path)
+            .map(|existing| {
+                existing
+                    .lines()
+                    .next()
+                    .is_some_and(|first| first.contains(GENERATED_MARKER))
+            })
+            .unwrap_or(false);
+        if !(bak.exists() && target_is_generated) {
+            std::fs::copy(path, &bak)
+                .with_context(|| format!("nie udało się zapisać kopii {}", bak.display()))?;
+        }
     }
     let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
     std::fs::write(&tmp, text)
@@ -121,6 +145,7 @@ pub fn save(path: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::diff;
     use diktate_config::{DaemonConfig, GtkConfig};
 
     #[test]
@@ -172,6 +197,41 @@ mod tests {
     }
 
     #[test]
+    fn druga_wizyta_kreatora_nie_kasuje_kopii_ręcznego_pliku() {
+        // Pierwszy zapis zastępuje plik napisany ręcznie — jego treść trafia
+        // do `.bak`, bo tylko ona jest nie do odtworzenia. Drugi zapis
+        // zastępuje już plik wygenerowany przez kreator, więc `.bak` ma
+        // zostać nietknięty: nadpisanie go podmieniłoby jedyną kopię ręcznej
+        // treści na kopię czegoś, co i tak dałoby się wygenerować ponownie.
+        let dir = std::env::temp_dir()
+            .join(format!("diktate-write-bak-manual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon.toml");
+        let ręczna_treść = "# napisane ręcznie, ma zostać w .bak\nlanguage = \"pl\"\n";
+        std::fs::write(&path, ręczna_treść).unwrap();
+
+        let pierwszy = daemon_toml(&DaemonConfig::default());
+        save(&path, &pierwszy).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("daemon.toml.bak")).unwrap(),
+            ręczna_treść
+        );
+
+        let mut inna = DaemonConfig::default();
+        inna.whisper.language = "en".to_string();
+        let drugi = daemon_toml(&inna);
+        save(&path, &drugi).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("daemon.toml.bak")).unwrap(),
+            ręczna_treść,
+            "drugi przebieg kreatora nadpisał kopię pliku napisanego ręcznie"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), drugi);
+    }
+
+    #[test]
     fn zapis_nie_zostawia_pliku_tymczasowego() {
         let dir = std::env::temp_dir()
             .join(format!("diktate-write-tmp-{}", std::process::id()));
@@ -186,5 +246,58 @@ mod tests {
             .filter_map(|wpis| wpis.ok())
             .any(|wpis| wpis.file_name().to_string_lossy().contains(".tmp"));
         assert!(!ma_plik_tmp, "po zapisie w katalogu został plik .tmp");
+    }
+
+    #[test]
+    fn daemon_toml_nie_gubi_żadnego_pola() {
+        // Sieć bezpieczeństwa na pole dodane kiedyś w `diktate-config`
+        // i zapomniane w tym generatorze: każde pole dostaje tu wartość inną
+        // niż domyślna, więc pominięcie któregokolwiek w `daemon_toml`
+        // ujawni się jako niepusta różnica po przejściu przez `from_toml`.
+        let mut cfg = DaemonConfig::default();
+        cfg.audio.device = "hw:1".to_string();
+        cfg.audio.pre_roll_ms = 301;
+        cfg.audio.level_interval_ms = 51;
+        cfg.vad.threshold = 0.6;
+        cfg.vad.silence_ms_to_end = 1_600;
+        cfg.vad.silence_ms_to_end_long = 201;
+        cfg.vad.long_segment_ms = 2_501;
+        cfg.vad.min_speech_ms = 301;
+        cfg.vad.max_segment_ms = 15_001;
+        cfg.whisper.model = "/tmp/model.bin".to_string();
+        cfg.whisper.language = "en".to_string();
+        cfg.whisper.initial_prompt = "test prompt".to_string();
+        cfg.whisper.beam_size = 2;
+        cfg.whisper.threads = 1;
+        cfg.queue.max_pending_segments = 17;
+
+        let wczytany = DaemonConfig::from_toml(&daemon_toml(&cfg)).unwrap();
+        let zmiany = diff::changes(&cfg, &wczytany).unwrap();
+        assert!(zmiany.is_empty(), "generator zgubił pola: {zmiany:?}");
+    }
+
+    #[test]
+    fn gtk_toml_nie_gubi_żadnego_pola() {
+        // Ta sama sieć bezpieczeństwa co wyżej, dla `gtk_toml`.
+        let mut cfg = GtkConfig::default();
+        cfg.window.width = 621;
+        cfg.window.height = 421;
+        cfg.window.show_level_meter = false;
+        cfg.daemon.autostart = false;
+        cfg.daemon.start_timeout_ms = 30_001;
+        cfg.dictation.insert_at_cursor = false;
+        cfg.dictation.auto_space = false;
+        cfg.dictation.strip_trailing_ellipsis = false;
+        cfg.dictation.follow_caret = false;
+        cfg.shortcuts.copy = "<Control>x".to_string();
+        cfg.shortcuts.undo = "<Control>y".to_string();
+        cfg.shortcuts.redo = "<Control><Shift>y".to_string();
+        cfg.shortcuts.toggle_recording = "<Control>v".to_string();
+        cfg.tray.enabled = false;
+        cfg.tray.show_backlog = false;
+
+        let wczytany = GtkConfig::from_toml(&gtk_toml(&cfg)).unwrap();
+        let zmiany = diff::changes(&cfg, &wczytany).unwrap();
+        assert!(zmiany.is_empty(), "generator zgubił pola: {zmiany:?}");
     }
 }
