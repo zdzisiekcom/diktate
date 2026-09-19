@@ -39,7 +39,7 @@ pub fn list() -> Result<()> {
             model.name,
             format_size(model.bytes),
             model.run_ms as f32 / 1000.0,
-            model.polish.opis(),
+            model.polish.description(),
             stan
         );
     }

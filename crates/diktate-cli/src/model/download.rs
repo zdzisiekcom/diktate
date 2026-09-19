@@ -155,23 +155,23 @@ mod tests {
         hex(&hasher.finalize())
     }
 
-    /// Źródło z pamięci — testy nie dotykają sieci. Liczy wywołania
-    /// `fetch`, żeby dało się sprawdzić, że sieć w ogóle nie została
-    /// odpytana, gdy `.part` jest już kompletny i zgodny sumą.
+    /// Źródło z pamięci — testy nie dotykają sieci. Pole `calls` liczy
+    /// wywołania `fetch`, żeby dało się sprawdzić, że sieć w ogóle nie
+    /// została odpytana, gdy `.part` jest już kompletny i zgodny sumą.
     struct Fake {
         data: Vec<u8>,
-        wywołania: Cell<u32>,
+        calls: Cell<u32>,
     }
 
     impl Fake {
         fn new(data: Vec<u8>) -> Self {
-            Self { data, wywołania: Cell::new(0) }
+            Self { data, calls: Cell::new(0) }
         }
     }
 
     impl Source for Fake {
         fn fetch(&self, _url: &str, from: u64) -> Result<Box<dyn Read>> {
-            self.wywołania.set(self.wywołania.get() + 1);
+            self.calls.set(self.calls.get() + 1);
             Ok(Box::new(Cursor::new(self.data[from as usize..].to_vec())))
         }
     }
@@ -191,7 +191,7 @@ mod tests {
             bytes: data.len() as u64,
             sha256: Box::leak(sha256_hex(data).into_boxed_str()),
             run_ms: 0,
-            polish: Polish::Dobra,
+            polish: Polish::Good,
             recommended: false,
         }
     }
@@ -262,7 +262,7 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), dane);
         assert_eq!(path, dir.join("ggml-test.bin"));
-        assert_eq!(source.wywołania.get(), 0, "sieć została odpytana mimo kompletnego .part");
+        assert_eq!(source.calls.get(), 0, "sieć została odpytana mimo kompletnego .part");
     }
 
     #[test]
