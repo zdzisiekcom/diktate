@@ -393,7 +393,11 @@ pub struct CorrectionConfig {
     /// Próg odsetka zmienionych słów dla dłuższej notatki — tu leży prawdziwe
     /// ryzyko. Model puszczony na akapit zmienia 33–37% słów i oddaje tekst,
     /// który czyta się lepiej, ale nie jest już wypowiedzią użytkownika,
-    /// a sprawdzić tego wzrokiem już się nie da.
+    /// a sprawdzić tego wzrokiem już się nie da. Próg jest mimo to luźny
+    /// (0,5), bo korektor ma dziś usuwać wypełniacze, jąkanie i fałszywe
+    /// starty — a to znaczy, że uczciwa korekta dyktowanego akapitu **musi**
+    /// zmienić dużo słów. Alarm przy 0,35 odpalałby się przy każdej dobrze
+    /// wykonanej robocie i przestałby cokolwiek znaczyć.
     pub max_change_ratio_long: f32,
     /// Ile zmienionych słów przechodzi zawsze, bez pytania — niezależnie od
     /// odsetka. W notatce z sześciu słów jedna uczciwa naprawa to już 17%
@@ -407,21 +411,37 @@ pub struct CorrectionConfig {
 
 /// Domyślny prompt korektora. Pochodzi wprost z pomiaru w `docs/11`: wersja
 /// bez przykładów napraw dawała model bierny, który nie ruszał nawet
-/// `ten wis per`.
+/// `ten wis per`. Drugie źródło jego kształtu to natura wejścia — to zapis
+/// **mowy**, a nie pisma, więc poza błędami rozpoznania trzeba z niego zdjąć
+/// wypełniacze, jąkanie i fałszywe starty. Dlatego prompt wylicza je z
+/// przykładami, a zakaz skracania mówi wprost, że ich usunięcie skracaniem
+/// nie jest — inaczej model traktuje je jak treść i zostawia nietknięte.
 const DEFAULT_CORRECTION_PROMPT: &str = "\
-Poprawiasz transkrypcje z systemu rozpoznawania mowy. System często ROZBIJA \
-jedno słowo na kilka albo myli słowa podobnie brzmiące — Twoim głównym \
-zadaniem jest je odtworzyć.
-Przykłady napraw:
+Poprawiasz transkrypcję MOWY DYKTOWANEJ. Ktoś mówił to na głos, więc tekst ma \
+wady mowy, nie pisma: powtórzenia, jąkanie, fałszywe starty, poprawianie się \
+w pół zdania, wypełniacze. Oddaj to, co mówca chciał napisać, a nie zapis \
+tego, jak mówił.
+System rozpoznawania mowy dodatkowo ROZBIJA jedno słowo na kilka albo myli \
+słowa podobnie brzmiące — odtwórz je:
   'ten wis per' → 'ten Whisper'
   'w kontener że' → 'w kontenerze'
   'morze tam być' → 'może tam być'
   'na gita bie' → 'na GitHubie'
-Usuwaj też wtrącenia (eee, yyy, mmm) i znaczniki typu [muzyka], [śmiech].
-Wstawiaj interpunkcję i wielkie litery.
-ZAKAZY: nie dodawaj nowych treści, nie skracaj wypowiedzi, nie zmieniaj liczb \
-ani nazw technicznych, nie zmieniaj stylu. Fragment już poprawny zostaw \
-nietknięty.
+Usuwaj stanowczo:
+  wtrącenia i wypełniacze (eee, yyy, mmm, yhm, no, jakby, tak jakby, w sumie, \
+generalnie, wiesz, prawda) oraz znaczniki typu [muzyka], [śmiech];
+  jąkanie i powtórzone słowa: 'to to to jest' → 'to jest';
+  fałszywe starty i autokorekty mówcy — zostaje wersja poprawiona: \
+'zrobimy to jutro, znaczy pojutrze' → 'zrobimy to pojutrze', \
+'ten plik, ten no, ten konfiguracyjny' → 'ten plik konfiguracyjny';
+  tę samą myśl powiedzianą dwa razy pod rząd — zostaje jedno sformułowanie.
+Wstawiaj interpunkcję i wielkie litery, dziel na zdania tam, gdzie mówca \
+sklejał je w jedno długie.
+ZAKAZY: nie dodawaj treści, której nie ma, nie streszczaj i nie gub żadnej \
+myśli (usuwanie wypełniaczy i powtórek skracaniem nie jest), nie zmieniaj \
+liczb, nazw własnych ani technicznych, nie podmieniaj słów mówcy na \
+ładniejsze synonimy, nie przestawiaj kolejności zdań. Fragment już poprawny \
+zostaw nietknięty.
 Odpowiadasz wyłącznie poprawionym tekstem.";
 
 /// Domyślny prompt redaktora. Redakcja odwraca umowę korekty: instrukcją jest
@@ -454,8 +474,8 @@ impl Default for CorrectionConfig {
             redaction_system_prompt: DEFAULT_REDACTION_PROMPT.to_string(),
             redaction_user_template: "Polecenie: {instruction}\n\nTekst:\n\n{text}".to_string(),
             short_text_words: 40,
-            max_change_ratio_short: 0.5,
-            max_change_ratio_long: 0.35,
+            max_change_ratio_short: 0.65,
+            max_change_ratio_long: 0.5,
             min_changed_words: 2,
             allowed_extra_chars: String::new(),
         }

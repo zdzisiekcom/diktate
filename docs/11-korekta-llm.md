@@ -83,23 +83,47 @@ dobrze, ale błędów rozpoznania praktycznie nie ruszał.
 system rozpoznawania mowy *rozbija słowa*, wraz z konkretnymi parami:
 
 ```
-Poprawiasz transkrypcje z systemu rozpoznawania mowy. System często ROZBIJA
-jedno słowo na kilka albo myli słowa podobnie brzmiące — Twoim głównym
-zadaniem jest je odtworzyć.
-Przykłady napraw:
+Poprawiasz transkrypcję MOWY DYKTOWANEJ. Ktoś mówił to na głos, więc tekst ma
+wady mowy, nie pisma: powtórzenia, jąkanie, fałszywe starty, poprawianie się
+w pół zdania, wypełniacze. Oddaj to, co mówca chciał napisać, a nie zapis
+tego, jak mówił.
+System rozpoznawania mowy dodatkowo ROZBIJA jedno słowo na kilka albo myli
+słowa podobnie brzmiące — odtwórz je:
   'ten wis per' → 'ten Whisper'
   'w kontener że' → 'w kontenerze'
   'morze tam być' → 'może tam być'
   'na gita bie' → 'na GitHubie'
-Usuwaj też wtrącenia (eee, yyy, mmm) i znaczniki typu [muzyka], [śmiech].
-Wstawiaj interpunkcję i wielkie litery.
-ZAKAZY: nie dodawaj nowych treści, nie skracaj wypowiedzi, nie zmieniaj liczb
-ani nazw technicznych, nie zmieniaj stylu. Fragment już poprawny zostaw
-nietknięty.
+Usuwaj stanowczo:
+  wtrącenia i wypełniacze (eee, yyy, mmm, yhm, no, jakby, tak jakby, w sumie,
+generalnie, wiesz, prawda) oraz znaczniki typu [muzyka], [śmiech];
+  jąkanie i powtórzone słowa: 'to to to jest' → 'to jest';
+  fałszywe starty i autokorekty mówcy — zostaje wersja poprawiona:
+'zrobimy to jutro, znaczy pojutrze' → 'zrobimy to pojutrze',
+'ten plik, ten no, ten konfiguracyjny' → 'ten plik konfiguracyjny';
+  tę samą myśl powiedzianą dwa razy pod rząd — zostaje jedno sformułowanie.
+Wstawiaj interpunkcję i wielkie litery, dziel na zdania tam, gdzie mówca
+sklejał je w jedno długie.
+ZAKAZY: nie dodawaj treści, której nie ma, nie streszczaj i nie gub żadnej
+myśli (usuwanie wypełniaczy i powtórek skracaniem nie jest), nie zmieniaj
+liczb, nazw własnych ani technicznych, nie podmieniaj słów mówcy na
+ładniejsze synonimy, nie przestawiaj kolejności zdań. Fragment już poprawny
+zostaw nietknięty.
 Odpowiadasz wyłącznie poprawionym tekstem.
 ```
 
-Wyniki tego promptu na korpusie testowym:
+Wersja pierwotna kończyła się na błędach rozpoznania i krótkim „usuwaj
+wtrącenia". To za mało: wejściem jest **mowa**, a mowa ma wady, których pismo
+nie ma — mówca się jąka, zaczyna zdanie dwa razy, poprawia się w pół słowa
+(„jutro, znaczy pojutrze"), zasypuje tekst wypełniaczami. Model traktował je
+jak treść, bo zakaz „nie skracaj wypowiedzi" czytał dosłownie. Stąd dwie
+zmiany: wyliczenie tych zjawisk z przykładami oraz wyjątek wpisany wprost
+w zakaz — usunięcie wypełniacza czy powtórki **nie jest** skracaniem.
+Przybyło za to zakazów chroniących treść (żadnych ładniejszych synonimów,
+żadnego przestawiania zdań), bo agresywniejszy korektor kusi się o redakcję,
+a od redakcji jest osobny tryb.
+
+Wyniki na korpusie testowym (pomiar wersji sprzed rozszerzenia o wady mowy —
+część odpowiadająca za błędy rozpoznania jest w niej ta sama):
 
 | Wejście (transkrypcja) | Wyjście | |
 |---|---|---|
@@ -192,9 +216,20 @@ i widać go w całości.
 
 Cena jest dokładnie ta, którą pomiar opisał: na dłuższym tekście model
 przechodzi z korekty w redakcję. Dlatego to właśnie **na długiej notatce**
-próg zmian jest ostrzejszy, a nie odwrotnie (`max_change_ratio_long` = 0,35
-wobec `max_change_ratio_short` = 0,5). Krótkie zdanie użytkownik ogarnia
+próg zmian jest ostrzejszy, a nie odwrotnie (`max_change_ratio_long` = 0,5
+wobec `max_change_ratio_short` = 0,65). Krótkie zdanie użytkownik ogarnia
 wzrokiem i sam widzi, co się zmieniło; akapitu już nie.
+
+Obie liczby poluzowano razem z rozszerzeniem promptu o wady mowy. Pierwotne
+0,35 brało się z pomiaru, w którym każda zmiana ponad naprawę słowa była
+niechcianą redakcją. Odkąd korektor ma **z założenia** wyrzucać wypełniacze,
+jąkanie i fałszywe starty, uczciwa korekta dyktowanego akapitu zmienia dużo
+słów sama z siebie — na wiadomości, która była powodem tej zmiany, wyszło
+blisko 30% przy zerowej ingerencji w treść. Próg trzymany na 0,35 pytałby
+więc po każdej dobrze wykonanej korekcie, a ostrzeżenie, które zapala się
+zawsze, przestaje być ostrzeżeniem. Granicą pozostaje to samo zjawisko
+z pomiaru: model, który przepisuje akapit po swojemu, schodzi wyraźnie
+powyżej tych progów.
 
 ### Zabezpieczenia — co z listy weszło
 
