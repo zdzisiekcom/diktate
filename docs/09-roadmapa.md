@@ -23,7 +23,7 @@ Rozszerza etap 0: dokłada VAD (przycisk Stop przestaje być potrzebny),
 transkrypcję strumieniową i model dokumentu.
 
 - `diktate-core`: capture (cpal), ring buffer, pre-roll, VAD (Silero), kolejka
-  segmentów, whisper-rs z backendem Vulkan, filtry halucynacji
+  segmentów, whisper.cpp z backendem Vulkan, filtry halucynacji
 - `diktate-proto` + serwer JSON-RPC na gnieździe uniksowym
 - `diktate-daemon` z journalem
 - `diktate-cli`: `toggle`, `start`, `stop`, `status`, `devices`,

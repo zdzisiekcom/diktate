@@ -20,7 +20,7 @@ Zakres:
 
 - `diktate-core`: przechwytywanie przez `cpal`, 16 kHz mono f32, całość
   nagrania trzymana w `Vec<f32>` w pamięci. Bez ring buffera, bez pre-rolla.
-- `whisper-rs`: jeden przebieg po **zakończeniu** nagrania. Nie strumieniowo.
+- whisper.cpp: jeden przebieg po **zakończeniu** nagrania. Nie strumieniowo.
 - `diktate-cli record --seconds N` wypisuje rozpoznany tekst na stdout.
 
 Kryterium zaliczenia: `diktate-cli record --seconds 10` po polsku zwraca tekst,
@@ -73,7 +73,7 @@ rozplątywanie GTK z rdzenia w momencie, gdy dochodzi trzeci klient.
 ## Wymagania wstępne
 
 - Rust (stabilny, przez `rustup`)
-- `cmake`, kompilator C++ — whisper.cpp buduje się jako część `whisper-rs`
+- `cmake`, kompilator C++ — whisper.cpp buduje się ze submodułu w ramach builda
 - `alsa-devel` (albo odpowiednik pipewire) dla `cpal`
 - `gtk4-devel`, `libadwaita-devel`
 - Model `ggml-small` (domyślny; `ggml-base` jest szybszy, ale gorzej radzi sobie

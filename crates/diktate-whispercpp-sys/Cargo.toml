@@ -1,0 +1,20 @@
+[package]
+name = "diktate-whispercpp-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Klucz `links` pilnuje, żeby w grafie zależności był dokładnie jeden
+# egzemplarz tego crate'a — dwie kopie znaczyłyby dwie kopie ggml w procesie.
+links = "whispercpp"
+
+[features]
+default = []
+# Backend Vulkan w ggml. Dotyczy whispera; parakeet i tak liczy na CPU
+# (patrz docs/12 — na iGPU jest 2,5× wolniejszy).
+vulkan = []
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1"
+cc = "1"

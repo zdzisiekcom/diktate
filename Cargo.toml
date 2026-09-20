@@ -4,6 +4,7 @@ members = [
     "crates/diktate-proto",
     "crates/diktate-document",
     "crates/diktate-config",
+    "crates/diktate-whispercpp-sys",
     "crates/diktate-core",
     "crates/diktate-daemon",
     "crates/diktate-cli",
@@ -20,21 +21,8 @@ diktate-proto = { path = "crates/diktate-proto" }
 diktate-core = { path = "crates/diktate-core" }
 diktate-document = { path = "crates/diktate-document" }
 diktate-config = { path = "crates/diktate-config" }
+diktate-whispercpp-sys = { path = "crates/diktate-whispercpp-sys" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
-
-# whisper-rs 0.14.4's src/vulkan.rs woła stare, specyficzne dla Vulkana
-# symbole (ggml_backend_vk_get_device_count i pokrewne), których whisper.cpp
-# dołączone do whisper-rs-sys 0.13.1 już nie eksportuje — ggml przeszło na
-# ogólne API rejestru backendów (ggml_backend_dev_*/ggml_backend_reg_*). To
-# błąd niezgodności w samym whisper-rs 0.14.4, niezależny od tego systemu
-# (wystąpiłby wszędzie z tą wersją whisper.cpp). Lokalna kopia w
-# vendor/whisper-rs-0.14.4 odtwarza tę samą funkcjonalność (enumerację GPU)
-# przez ogólne API — patrz vendor/whisper-rs-0.14.4/src/vulkan.rs. Publiczne
-# API modułu bez zmian. Te ogólne symbole są już w gotowych bindingach
-# whisper-rs-sys (src/bindings.rs), więc WHISPER_DONT_GENERATE_BINDINGS=1
-# (patrz .cargo/config.toml) może zostać — nie trzeba łatać whisper-rs-sys.
-[patch.crates-io]
-whisper-rs = { path = "vendor/whisper-rs-0.14.4" }

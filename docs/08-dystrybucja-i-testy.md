@@ -22,10 +22,10 @@ cargo build --release --features rocm        # + ROCm dla AMD
 cargo build --release --no-default-features  # tylko CPU
 ```
 
-whisper.cpp jest kompilowany przez `whisper-rs` w ramach builda, więc flagi
-CMake są pod kontrolą Cargo. Wymagane do budowy: `cmake`, `clang`, nagłówki
-Vulkan (`vulkan-headers`, `shaderc`), GTK4 i libadwaita (tylko dla
-`diktate-gtk`).
+whisper.cpp jest kompilowany w ramach builda ze submodułu `vendor/whisper.cpp`
+(po świeżym klonie: `git submodule update --init`), więc flagi CMake są pod
+kontrolą Cargo. Wymagane do budowy: `cmake`, kompilator C++, nagłówki Vulkan
+(`vulkan-headers`, `shaderc`), GTK4 i libadwaita (tylko dla `diktate-gtk`).
 
 `diktate-daemon`, `diktate-cli` i `diktate-agent` **nie zależą od GTK** —
 budują się i działają na maszynie bez serwera wyświetlania.

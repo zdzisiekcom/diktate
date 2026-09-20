@@ -4,7 +4,7 @@
 //! z czytelnym komunikatem**, nigdy ciche wartości domyślne. Literówka
 //! w nazwie pola jest błędem, a nie polem pominiętym po cichu.
 
-use diktate_config::{DaemonConfig, GtkConfig};
+use diktate_config::{Backend, DaemonConfig, GtkConfig};
 
 #[test]
 fn pusty_plik_daje_same_wartosci_domyslne() {
@@ -195,4 +195,81 @@ fn szablon_redakcji_bez_tekstu_jest_bledem() {
     )
     .expect_err("szablon bez {text} nie przekaże modelowi, co redagować");
     assert!(format!("{err:#}").contains("redaction_user_template"));
+}
+
+// --- wybór backendu transkrypcji (docs/12) ---
+
+#[test]
+fn domyslnym_backendem_jest_whisper() {
+    let config = DaemonConfig::from_toml("").expect("pusty plik jest poprawny");
+    assert_eq!(config.transcription.backend, Backend::Whisper);
+}
+
+#[test]
+fn backend_parakeet_da_sie_wybrac_a_model_ma_wartosc_domyslna() {
+    let config = DaemonConfig::from_toml("[transcription]\nbackend = \"parakeet\"\n")
+        .expect("parakeet jest znanym backendem");
+    assert_eq!(config.transcription.backend, Backend::Parakeet);
+    assert!(
+        config.parakeet.model.is_empty(),
+        "pusta ścieżka znaczy: użyj domyślnej, a jest: {}",
+        config.parakeet.model
+    );
+    assert_eq!(
+        config.parakeet.threads, 0,
+        "zero znaczy: tyle wątków, ile widzi system"
+    );
+}
+
+#[test]
+fn liczbe_watkow_parakeeta_da_sie_ustawic() {
+    let config = DaemonConfig::from_toml("[parakeet]\nthreads = 10\n")
+        .expect("liczba wątków jest polem tej sekcji");
+    assert_eq!(config.parakeet.threads, 10);
+}
+
+#[test]
+fn nieznany_backend_zatrzymuje_start() {
+    let err = DaemonConfig::from_toml("[transcription]\nbackend = \"whisperr\"\n")
+        .expect_err("literówka w nazwie backendu musi zatrzymać start");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("whisperr"),
+        "komunikat ma wskazywać winną wartość, a jest: {message}"
+    );
+}
+
+#[test]
+fn stary_wpis_endpoint_zatrzymuje_start_i_wskazuje_winne_pole() {
+    // Parakeet chodził kiedyś jako serwer HTTP i konfiguracje z tamtych
+    // czasów mają `[parakeet] endpoint`. Ciche zignorowanie tego pola
+    // znaczyłoby, że ktoś dalej wierzy w adres, który nikogo już nie
+    // obchodzi — więc `deny_unknown_fields` ma zatrzymać start.
+    let err = DaemonConfig::from_toml(
+        "[transcription]\nbackend = \"parakeet\"\n[parakeet]\nendpoint = \"http://x:8082/pcm\"\n",
+    )
+    .expect_err("nieznane pole musi zatrzymać start");
+    assert!(
+        format!("{err:#}").contains("endpoint"),
+        "komunikat ma wskazać winne pole, a jest: {err:#}"
+    );
+}
+
+#[test]
+fn sekcja_parakeeta_nie_przeszkadza_gdy_gra_whisper() {
+    // Nieużywana sekcja nie ma prawa blokować startu — inaczej samo
+    // istnienie drugiego backendu byłoby kosztem dla wszystkich.
+    DaemonConfig::from_toml("[parakeet]\nthreads = 4\n")
+        .expect("przy whisperze ustawienia parakeeta nikogo nie obchodzą");
+}
+
+#[test]
+fn zerowa_liczba_watkow_parakeeta_jest_poprawna() {
+    // Zero nie jest tu brakiem wartości, tylko wyborem: „tyle wątków, ile
+    // widzi system". Rozstrzyga to `resolve_threads` w diktate-core.
+    let config = DaemonConfig::from_toml(
+        "[transcription]\nbackend = \"parakeet\"\n[parakeet]\nthreads = 0\n",
+    )
+    .expect("zero znaczy: wybierz sam");
+    assert_eq!(config.parakeet.threads, 0);
 }

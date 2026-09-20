@@ -8,14 +8,17 @@
 pub mod capture;
 pub mod filters;
 pub mod level;
+pub mod parakeet;
 pub mod segmenter;
 pub mod session;
 pub mod transcribe;
 pub mod vad;
 
-/// Częstotliwość, której oczekuje whisper.
+/// Częstotliwość, której oczekują oba modele — whisper i Parakeet
+/// (`docs/12-backendy-transkrypcji.md`). Żaden nie resampluje.
 pub const SAMPLE_RATE: u32 = 16_000;
 
 pub use capture::{input_device_names, Recorder, Recording};
 pub use session::{Session, SessionConfig};
-pub use transcribe::Transcriber;
+pub use parakeet::ParakeetTranscriber;
+pub use transcribe::{Transcribe, Transcriber};

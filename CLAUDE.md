@@ -65,31 +65,59 @@ w pamięci i zmiany wyglądały, jakby nie działały.
 
 ## Pułapki tego środowiska
 
-Trzy obejścia, które wyglądają na dziwactwa, a są konieczne — nie usuwaj ich
+Jedno obejście, które wygląda na dziwactwo, a jest konieczne — nie usuwaj go
 bez sprawdzenia, że problem zniknął:
 
-- **`WHISPER_DONT_GENERATE_BINDINGS=1`** w `.cargo/config.toml` — bindgen
-  0.71 z clang 22 i glibc 2.43 źle wylicza rozmiary struktur (`_IO_FILE`),
-  co daje `E0080` w wygenerowanych bindingach.
-- **`[patch.crates-io]` na `vendor/whisper-rs-0.14.4`** — oryginalny
-  `vulkan.rs` woła symbole `ggml_backend_vk_*`, których whisper.cpp już nie
-  eksportuje po przejściu na ogólny rejestr backendów. Bez tej łatki Vulkan
-  się nie kompiluje, a bez Vulkana transkrypcja jest ~6× wolniejsza
-  (3,1 s wobec 18,1 s na `testdata/jfk.wav`, model `small`).
 - **`openssl-sys` z cechą `vendored` w `[build-dependencies]`** rdzenia —
   `ort` (przez `voice_activity_detector`) ciągnie `native-tls` w swoim
   `build.rs`, a system nie ma nagłówków OpenSSL. Unifikacja cech w resolverze
   v2 jest osobna dla build-dependencies, więc wpis musi być właśnie tam.
+
+Dwa wcześniejsze obejścia — `WHISPER_DONT_GENERATE_BINDINGS=1` w
+`.cargo/config.toml` i łatka `[patch.crates-io]` na `vendor/whisper-rs-0.14.4`
+— **zniknęły** razem z `whisper-rs`. Oba brały się z tego, że wiązania
+rustowe zostawały w tyle za whisper.cpp: bindgen psuł się na strukturach
+glibc, a `vulkan.rs` wołał symbole `ggml_backend_vk_*`, usunięte po przejściu
+ggml na ogólny rejestr backendów. Dziś whisper.cpp jest submodułem, a wiązania
+są własne i wąskie (patrz niżej), więc ta klasa problemów nie ma się gdzie
+pojawić.
+
+## whisper.cpp jako submoduł
+
+Silnik żyje w `vendor/whisper.cpp` (submoduł przypięty do wydania **v1.9.4**)
+i daje oba modele naraz: `libwhisper` i `libparakeet` dzielą jedną kopię ggml.
+Po świeżym sklonowaniu repo trzeba raz:
+
+```bash
+git submodule update --init
+```
+
+`WHISPER_CPP_DIR=/ścieżka/do/klonu` nadpisuje ten wybór, gdy ktoś ma już
+zbudowane drzewo i nie chce kompilować go po raz drugi.
+
+Rust **nie odwzorowuje** struktur whisper.cpp. `whisper_full_params` ma 61 pól
+i jest przekazywana przez wartość, więc każda zmiana pola w silniku psułaby
+wiązania po cichu — bez błędu kompilacji, za to z przesuniętymi wartościami
+w czasie pracy. Zamiast tego jest warstwa pośrednia w C++
+(`crates/diktate-whispercpp-sys/src/shim.{h,cpp}`), a przez granicę FFI
+przechodzą wyłącznie wskaźniki i liczby. Dokładając cokolwiek do API silnika,
+dokłada się to tam, a nie w Ruście.
 
 ## Wydajność transkrypcji — liczby, o których łatwo zapomnieć
 
 Whisper przetwarza zawsze okno **30 sekund**, więc koszt segmentu jest
 zdominowany przez enkoder i prawie nie zależy od tego, ile w segmencie mowy.
 „Prawie" — bo dekoder skaluje się z liczbą tokenów. Zmierzone dla
-`small-q5_1` na Vulkanie: 2 s materiału → 2,6 s, 3 s → 2,8 s, 5 s → 3,0 s.
-Wniosek jest mocniejszy, niż gdyby koszt był idealnie stały: **krótkie
-segmenty się nie opłacają**, bo dwusekundowy wycinek kosztuje prawie tyle,
-co pięciosekundowy.
+`small-q5_1` na Vulkanie, whisper.cpp **1.9.4**: 2 s materiału → 0,89 s,
+3 s → 1,14 s, 5 s → 1,44 s. Wniosek jest mocniejszy, niż gdyby koszt był
+idealnie stały: **krótkie segmenty się nie opłacają**, bo dwusekundowy
+wycinek kosztuje ponad połowę tego, co pięciosekundowy, choć niesie 2,5×
+mniej mowy.
+
+Te liczby są nowe. Do wersji 1.7.4 (przez `whisper-rs`) te same segmenty
+kosztowały 2,6 / 2,8 / 3,0 s — przejście na 1.9.4 dało **2,1–2,9× szybciej**,
+przy tym samym modelu i tym samym GPU. Wnioski oparte na starych liczbach
+trzeba przeliczyć, a nie przepisać.
 
 Segmenter mimo to tnie płynnie, adaptacyjnym progiem ciszy (`docs/07`):
 rozpędzona wypowiedź domyka się już po 200 ms pauzy, żeby tekst pojawiał się
@@ -99,8 +127,10 @@ zera, więc dopiero ten próg wyznacza, jak często tekst wychodzi.
 
 ### Modele na tym sprzęcie (Intel Meteor Lake, Vulkan)
 
-Mierzone na 20 s polskiej mowy, model wczytany raz
-(`cargo run -p diktate-core --example bench-model -- plik.wav 4`):
+Mierzone na 20 s polskiej mowy, model wczytany raz, jeszcze na whisper.cpp
+1.7.4 (`cargo run -p diktate-core --example bench-model -- plik.wav 4`).
+**Bezwzględne czasy są więc zawyżone ~2,5×** wobec dzisiejszego silnika;
+proporcje między modelami zostają:
 
 | model | rozmiar | wczytanie | przebieg | jakość polszczyzny |
 |-------|---------|-----------|----------|--------------------|
@@ -121,9 +151,12 @@ Kwantyzacja na Vulkanie **nie** spowalnia: `small-q5_1` jest szybsze od
 ### Dobieranie `long_segment_ms`
 
 Segment musi kosztować mniej, niż trwa, inaczej kolejka rośnie i tekst
-pojawia się **później**, nie wcześniej. Dla `small-q5_1` (~2,8 s na segment)
-próg 2500 ms daje segmenty ~3,4 s, czyli ~85% przepustowości — to granica.
-Niżej schodzi się tylko razem ze zmianą na szybszy model.
+pojawia się **później**, nie wcześniej. Dla `small-q5_1` na 1.9.4 (~1,2 s na
+segment) próg 2500 ms daje segmenty ~3,4 s, czyli ~35% przepustowości.
+Na 1.7.4 było to ~85% i próg 2500 ms był granicą — dziś **nie jest**, więc
+zejście niżej stało się możliwe bez zmiany modelu. Nie zostało zrobione:
+zmiana rytmu segmentacji dotyka semantyki dyktowania (`docs/07`), a nie tylko
+wydajności, i wymaga osobnej decyzji.
 
 Każdy pomysł na zmianę rytmu segmentacji trzeba skonfrontować z obiema
 liczbami naraz: kosztem przebiegu dla wybranego modelu i długością segmentu,

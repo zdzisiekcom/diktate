@@ -22,6 +22,7 @@ Status: **faza projektowa**. Nie ma jeszcze kodu.
 | [09-roadmapa.md](09-roadmapa.md) | Kolejność prac, etapy, co świadomie odłożone |
 | [10-wake-word.md](10-wake-word.md) | Aktywacja głosem — przegląd silników, wybrane rozwiązanie |
 | [11-korekta-llm.md](11-korekta-llm.md) | Korekta i redakcja tekstu lokalnym LLM-em — pomiary, zabezpieczenia, wdrożenie |
+| [12-backendy-transkrypcji.md](12-backendy-transkrypcji.md) | Whisper kontra Parakeet — dwa modele w jednym procesie, kompromisy, progi |
 
 ## Decyzje, które już zapadły
 

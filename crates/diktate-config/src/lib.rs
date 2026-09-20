@@ -43,8 +43,50 @@ fn read_or_default(path: &std::path::Path) -> Result<String> {
 pub struct DaemonConfig {
     pub audio: AudioConfig,
     pub vad: VadConfig,
+    pub transcription: TranscriptionConfig,
     pub whisper: WhisperConfig,
+    pub parakeet: ParakeetConfig,
     pub queue: QueueConfig,
+}
+
+/// Który silnik zamienia dźwięk na tekst (`docs/12-backendy-transkrypcji.md`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TranscriptionConfig {
+    pub backend: Backend,
+}
+
+/// Silniki transkrypcji, między którymi wybiera `transcription.backend`.
+///
+/// Nazwa spoza listy zatrzymuje start — serde wypisze wtedy wartość winną
+/// i wszystkie dopuszczalne, co jest lepszą diagnostyką niż cichy powrót do
+/// whispera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    /// whisper.cpp w procesie daemona; tekst końcowy, wierny (WER ~5%).
+    #[default]
+    Whisper,
+    /// Model Parakeet TDT, też w procesie daemona; szybki podgląd, ale myli
+    /// treść (WER ~15%) i sam wykrywa język.
+    Parakeet,
+}
+
+/// Model Parakeeta: skąd go wziąć i iloma wątkami liczyć. Minimum 3 s audio
+/// nie jest tu wpisane, bo należy do modelu, a nie do konfiguracji — pyta
+/// o nie warstwa wiązań (`dk_parakeet_min_audio_s`).
+/// Obie wartości domyślne są „puste" i to jest ich treść: pusta ścieżka
+/// znaczy „weź domyślną", a zero wątków — „wybierz sam". Stąd wyprowadzony
+/// `Default`, a nie wypisany ręcznie.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ParakeetConfig {
+    /// Ścieżka modelu ggml; puste = `$DIKTATE_PARAKEET_MODEL` albo
+    /// `~/.diktate/models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin`.
+    pub model: String,
+    /// Liczba wątków; 0 znaczy „tyle, ile widzi system". Optimum wypada na
+    /// liczbie rdzeni fizycznych — SMT szkodzi (docs/12).
+    pub threads: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +250,11 @@ impl DaemonConfig {
         if self.queue.max_pending_segments == 0 {
             bail!("queue.max_pending_segments musi być większe od zera");
         }
+        // Sekcja `[parakeet]` nie ma nic do sprawdzenia: pusty `model`
+        // znaczy „ścieżka domyślna", a zerowe `threads` — „tyle, ile widzi
+        // system". Istnienie pliku modelu rozstrzyga się przy starcie
+        // daemona, tak samo jak przy whisperze, bo to stan dysku, a nie
+        // poprawność konfiguracji.
         Ok(())
     }
 }

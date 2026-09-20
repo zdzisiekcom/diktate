@@ -55,6 +55,9 @@ long_segment_ms = 2500        # od tej długości obowiązuje krótszy próg
 min_speech_ms = 300           # krótsze odrzucane jako trzask
 max_segment_ms = 15000        # twarde cięcie (okno whispera to 30 s)
 
+[transcription]
+backend = "whisper"           # albo "parakeet" — docs/12-backendy-transkrypcji.md
+
 [whisper]
 model = ""                    # ścieżka ggml; puste = $DIKTATE_MODEL,
                               # potem ~/.diktate/models/ggml-small-q5_1.bin
@@ -62,6 +65,11 @@ threads = 0                   # 0 = decyzja whispera
 language = "pl"               # kod ISO albo "auto"
 initial_prompt = ""           # terminologia i nazwy własne
 beam_size = 1                 # 1 = dekodowanie zachłanne
+
+[parakeet]                    # używane tylko przy backend = "parakeet"
+model = ""                    # ścieżka ggml; puste = $DIKTATE_PARAKEET_MODEL,
+                              # potem ~/.diktate/models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin
+threads = 0                   # 0 = tyle, ile widzi system
 
 [queue]
 max_pending_segments = 16
@@ -101,6 +109,12 @@ którym się je robi (`--example bench-model`), opisuje `CLAUDE.md`, sekcja
 
 Progi powyżej są nazwane tak, jak pokrętła, które faktycznie istnieją
 w `SegmenterConfig` — jedna nazwa, jedno miejsce.
+
+Rachunek przepustowości jest własnością backendu, nie progów: parakeet liczy
+~4,7× szybciej niż mowa i znosi progi, przy których whisper miałby ciaśniej —
+ale w drugą stronę wymaga segmentów **dłuższych** niż 3 s, bo poniżej myli
+język. Zalecany profil `[vad]` dla tego backendu i uzasadnienie:
+[12-backendy-transkrypcji.md](12-backendy-transkrypcji.md#zalecany-profil-vad-dla-parakeeta).
 
 ### Profile językowe (etap 3)
 

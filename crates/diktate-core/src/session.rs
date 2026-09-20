@@ -40,7 +40,7 @@ use crate::capture::{Recorder, StreamingRecording};
 use crate::filters;
 use crate::level::{Level, LevelMeter, DEFAULT_INTERVAL_MS};
 use crate::segmenter::{Segment, Segmenter, SegmenterConfig};
-use crate::transcribe::Transcriber;
+use crate::transcribe::Transcribe;
 use crate::vad::{Vad, CHUNK_SAMPLES};
 
 /// Parametry sesji — wszystkie pochodzą z `daemon.toml` (`docs/04`).
@@ -180,7 +180,7 @@ impl Session {
     /// wskaźnik w oknie ma pokazać brak wychyleń natychmiast, zanim ktoś
     /// przedyktuje minutę do wyłączonego mikrofonu.
     pub fn start<F, G, L>(
-        transcriber: Arc<Transcriber>,
+        transcriber: Arc<dyn Transcribe>,
         config: SessionConfig,
         on_segment: F,
         on_backlog: G,
@@ -337,7 +337,7 @@ fn dispatch_segment<G: Fn(u32)>(
 /// segmentu.
 fn run_transcriber<F, G: Fn(u32)>(
     segment_rx: Receiver<(u64, Segment, Instant)>,
-    transcriber: &Transcriber,
+    transcriber: &dyn Transcribe,
     on_segment: F,
     backlog: &Backlog<G>,
 ) where

@@ -1,15 +1,53 @@
-//! Transkrypcja przez whisper.cpp (`whisper-rs`).
+//! Transkrypcja przez whisper.cpp.
 //!
 //! Model ładowany raz i trzymany w pamięci. Parametry dekodowania pochodzą
 //! z `daemon.toml` (`docs/04`) — w kodzie nie ma dla nich magicznych
 //! stałych, są tylko wartości domyślne.
+//!
+//! Wywołania idą przez warstwę pośrednią z `diktate-whispercpp-sys`, a nie
+//! przez odwzorowanie `whisper_full_params` w Ruście: ta struktura ma 61 pól
+//! i jest przekazywana przez wartość, więc każda zmiana w whisper.cpp
+//! psułaby nas po cichu. Szczegóły w `crates/diktate-whispercpp-sys/src/shim.h`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use std::ffi::{CStr, CString};
 use std::path::Path;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use std::sync::Mutex;
+
+use diktate_whispercpp_sys as sys;
+
+/// Silnik zamieniający próbki na tekst. Potok sesji zna tylko ten trait, więc
+/// backend (whisper albo Parakeet — `docs/12`) da się podmienić bez ruszania
+/// VAD-u, segmentera ani kolejki.
+///
+/// `Send + Sync`, bo transkryber jest dzielony (przez `Arc`) z wątkiem
+/// transkrypcji sesji.
+pub trait Transcribe: Send + Sync {
+    /// Transkrybuje mono 16 kHz ([`crate::SAMPLE_RATE`]). Pusty wynik znaczy
+    /// „nie rozpoznano mowy" i nie jest błędem.
+    fn transcribe(&self, samples: &[f32]) -> Result<String>;
+}
+
+/// Uchwyt kontekstu whisper.cpp.
+///
+/// `whisper_full` nie jest bezpieczne dla wielu wątków na tym samym
+/// kontekście, więc dostęp idzie przez `Mutex`. W praktyce transkrybuje
+/// jeden wątek sesji, ale trait wymaga `Sync` i lepiej to zagwarantować
+/// zamkiem niż obietnicą.
+struct WhisperCtx(*mut sys::DkWhisper);
+
+// SAFETY: wskaźnik jest własnością tej struktury i nigdy nie wycieka; cały
+// dostęp do niego jest szeregowany `Mutex`-em w `Transcriber`.
+unsafe impl Send for WhisperCtx {}
+
+impl Drop for WhisperCtx {
+    fn drop(&mut self) {
+        unsafe { sys::dk_whisper_close(self.0) };
+    }
+}
 
 pub struct Transcriber {
-    ctx: WhisperContext,
+    ctx: Mutex<WhisperCtx>,
     language: String,
     /// Podpowiedź kontekstowa doklejana do promptu: terminologia, nazwy
     /// własne. Puste = bez podpowiedzi.
@@ -27,13 +65,13 @@ impl Transcriber {
         if !path.exists() {
             return Err(anyhow!("nie znaleziono modelu: {}", path.display()));
         }
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| anyhow!("ścieżka modelu nie jest poprawnym UTF-8"))?;
-        let ctx = WhisperContext::new_with_params(path_str, WhisperContextParameters::default())
-            .with_context(|| format!("nie udało się wczytać modelu {}", path.display()))?;
+        let c_path = cstring(path_str(path)?)?;
+        let ctx = unsafe { sys::dk_whisper_open(c_path.as_ptr(), true) };
+        if ctx.is_null() {
+            bail!("nie udało się wczytać modelu {}", path.display());
+        }
         Ok(Self {
-            ctx,
+            ctx: Mutex::new(WhisperCtx(ctx)),
             language: "pl".to_string(),
             initial_prompt: String::new(),
             beam_size: 1,
@@ -67,50 +105,72 @@ impl Transcriber {
         if samples.is_empty() {
             return Ok(String::new());
         }
+        let language = cstring(&self.language)?;
+        let prompt = cstring(&self.initial_prompt)?;
 
-        let strategy = if self.beam_size > 1 {
-            SamplingStrategy::BeamSearch {
-                beam_size: self.beam_size as i32,
-                patience: 0.0,
-            }
-        } else {
-            SamplingStrategy::Greedy { best_of: 1 }
-        };
-        let mut params = FullParams::new(strategy);
-        params.set_language(Some(&self.language));
-        if !self.initial_prompt.is_empty() {
-            params.set_initial_prompt(&self.initial_prompt);
-        }
-        if self.threads > 0 {
-            params.set_n_threads(self.threads as i32);
-        }
-        params.set_translate(false);
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-
-        let mut state = self
+        let guard = self
             .ctx
-            .create_state()
-            .context("nie udało się utworzyć stanu whispera")?;
-        state
-            .full(params, samples)
-            .context("transkrypcja nie powiodła się")?;
-
-        let count = state
-            .full_n_segments()
-            .context("nie udało się odczytać liczby segmentów")?;
-        let mut text = String::new();
-        for i in 0..count {
-            let segment = state
-                .full_get_segment_text(i)
-                .with_context(|| format!("nie udało się odczytać segmentu {i}"))?;
-            text.push_str(segment.trim());
-            text.push(' ');
+            .lock()
+            .map_err(|_| anyhow!("kontekst whispera został zatruty przez panikę"))?;
+        let code = unsafe {
+            sys::dk_whisper_transcribe(
+                guard.0,
+                samples.as_ptr(),
+                samples.len() as i32,
+                language.as_ptr(),
+                prompt.as_ptr(),
+                self.beam_size as i32,
+                self.threads as i32,
+            )
+        };
+        if code != 0 {
+            let message = unsafe { read_cstr(sys::dk_whisper_error(guard.0)) };
+            bail!("transkrypcja nie powiodła się: {message}");
         }
-        Ok(text.trim().to_string())
+        let text = unsafe { read_cstr(sys::dk_whisper_text(guard.0)) };
+        Ok(join_segments(&text))
     }
+}
+
+impl Transcribe for Transcriber {
+    fn transcribe(&self, samples: &[f32]) -> Result<String> {
+        Transcriber::transcribe(self, samples)
+    }
+}
+
+/// Składa segmenty (po jednym w wierszu) w jedno zdanie. Whisper zwraca
+/// segmenty z wiodącą spacją, stąd przycinanie każdego z osobna.
+pub(crate) fn join_segments(text: &str) -> String {
+    let mut out = String::new();
+    for segment in text.lines() {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(segment);
+    }
+    out
+}
+
+pub(crate) fn path_str(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow!("ścieżka modelu nie jest poprawnym UTF-8"))
+}
+
+pub(crate) fn cstring(value: &str) -> Result<CString> {
+    CString::new(value).context("tekst dla whisper.cpp zawiera bajt zerowy")
+}
+
+/// SAFETY: wskaźnik pochodzi z warstwy pośredniej i wskazuje bufor żyjący do
+/// następnego wywołania na tym kontekście; kopiujemy go od razu.
+pub(crate) unsafe fn read_cstr(ptr: *const std::os::raw::c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    CStr::from_ptr(ptr).to_string_lossy().into_owned()
 }
 
 /// Domyślna ścieżka modelu: `$DIKTATE_MODEL`, a bez niej
@@ -122,7 +182,37 @@ pub fn default_model_path() -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("DIKTATE_MODEL") {
         return std::path::PathBuf::from(path);
     }
+    models_dir().join("ggml-small-q5_1.bin")
+}
+
+/// `~/.diktate/models` — wspólny katalog modeli obu backendów.
+pub(crate) fn models_dir() -> std::path::PathBuf {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     home.unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".diktate/models/ggml-small-q5_1.bin")
+        .join(".diktate/models")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_segments_przycina_i_skleja_spacja() {
+        assert_eq!(join_segments(" Ala ma kota.\n A kot ma Alę."), "Ala ma kota. A kot ma Alę.");
+    }
+
+    #[test]
+    fn join_segments_pomija_puste_wiersze() {
+        assert_eq!(join_segments("\n  \nTekst\n\n"), "Tekst");
+    }
+
+    #[test]
+    fn join_segments_pustego_wejscia_daje_pusty_tekst() {
+        assert_eq!(join_segments(""), "");
+    }
+
+    #[test]
+    fn cstring_odrzuca_bajt_zerowy() {
+        assert!(cstring("a\0b").is_err());
+    }
 }

@@ -57,7 +57,7 @@ jednego, z osobnym strojeniem i osobnym trybem awarii.
 Podejście z `tiny` obsługuje oba przypadki jednym przebiegiem: tekst wypowiedzi
 już istnieje, wystarczy dopasować go do reguł ([05-agent.md](05-agent.md)).
 
-Drugi argument: **zero nowych zależności**. Silero VAD, whisper-rs, ring buffer
+Drugi argument: **zero nowych zależności**. Silero VAD, whisper.cpp, ring buffer
 i rozmyte dopasowywanie są budowane w etapach 1–3 niezależnie od wake worda.
 Ta funkcja to ich złożenie, nie nowy podsystem.
 

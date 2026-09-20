@@ -7,41 +7,25 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 cpal = "0.15"
-whisper-rs = { version = "0.14", default-features = false }
+diktate-whispercpp-sys.workspace = true
 voice_activity_detector = "0.2"
+serde_json.workspace = true
 
 [dev-dependencies]
 hound = "3"
 
-# Backend obliczeniowy whisper.cpp: feature `vulkan` jest domyślna od kiedy
-# na tym sprzęcie (Intel Meteor Lake, iGPU Arc) okazała się wyraźnie
-# szybsza niż CPU (small model, testdata/jfk.wav: Vulkan ok. 3,1 s vs CPU
-# 18,1 s transkrypcji — patrz README). `cargo build --no-default-features`
-# nadal daje czysty build na CPU.
+# Backend obliczeniowy whisper.cpp: cecha `vulkan` jest domyślna, odkąd na
+# tym sprzęcie (Intel Meteor Lake, iGPU Arc) okazała się wyraźnie szybsza niż
+# CPU przy whisperze. `cargo build --no-default-features` nadal daje czysty
+# build na CPU.
 #
-# Historia problemu (dla przyszłych zmian tego kodu): gotowe bindingi
-# whisper-rs-sys (`src/bindings.rs`, używane bo `.cargo/config.toml` ustawia
-# WHISPER_DONT_GENERATE_BINDINGS=1 — obejście niepowiązanego błędu bindgena
-# z rozmiarami struktur glibc) są generowane bez cechy `vulkan`, więc nie
-# mają deklaracji specyficznych dla Vulkana typu `ggml_backend_vk_*`. Na
-# szczęście CAŁY potrzebny zestaw funkcji (ogólne API rejestru backendów
-# ggml: `ggml_backend_dev_*`, `ggml_backend_reg_*`) już w nich jest — to
-# część rdzenia ggml, nie coś specyficznego dla Vulkana. Jedyną realną
-# przeszkodą był sam whisper-rs 0.14.4: jego `src/vulkan.rs` woła stare,
-# usunięte z bieżącego whisper.cpp symbole `ggml_backend_vk_*`. Naprawiono
-# to lokalną łatką (`[patch.crates-io]` w workspace `Cargo.toml`,
-# `vendor/whisper-rs-0.14.4/src/vulkan.rs`), która odtwarza tę samą
-# funkcjonalność (enumeracja GPU) przez ogólne API rejestru backendów.
-# Whisper-rs-sys NIE jest łatane — bierze się wprost z crates.io.
+# Cecha dotyczy whispera, nie parakeeta: parakeet liczy na rdzeniach zawsze,
+# bo na tym iGPU jego enkoder jest 2,5× wolniejszy niż na CPU (docs/12).
+# Oba modele dzielą jednak jedną kopię ggml, więc backend Vulkan buduje się
+# raz i whisper z niego korzysta niezależnie od decyzji parakeeta.
 [features]
 default = ["vulkan"]
-vulkan = ["whisper-rs/vulkan"]
+vulkan = ["diktate-whispercpp-sys/vulkan"]
 
-# `ort` (przez voice_activity_detector) domyślnie pobiera onnxruntime w swoim
-# build.rs przez ureq/native-tls/openssl-sys. Na tym systemie brakuje
-# openssl-devel/pkg-config, więc build-dependency openssl-sys się nie buduje.
-# Unifikacja cech w resolverze v2 jest osobna dla build-dependencies, więc
-# samo dodanie openssl-sys do [dependencies] nic nie dawało — musi być tutaj,
-# żeby wymusić wariant "vendored" (budowany ze źródeł, bez nagłówków systemowych).
 [build-dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }

@@ -19,10 +19,16 @@ Sprzęt docelowy to Intel Meteor Lake (iGPU Arc + NPU) oraz druga maszyna z AMD.
 whisper.cpp: Vulkan, SYCL/oneAPI, OpenVINO, ROCm.
 
 W obu językach wywoływane jest to samo C++, różnica leży w jakości bindingów.
-`whisper-rs` jest aktywnie utrzymywany i eksponuje feature flagi (`vulkan`,
-`openblas`, `hipblas`), a whisper.cpp kompiluje się jako część builda — pełna
-kontrola nad flagami CMake. Pythonowe `pywhispercpp` jest cieńsze, wolniej
-nadąża za upstreamem, a zmiana backendu wymaga przebudowy kółka.
+Pythonowe `pywhispercpp` jest cieńsze, wolniej nadąża za upstreamem, a zmiana
+backendu wymaga przebudowy kółka.
+
+Pierwotnie stał tu `whisper-rs`, ale okazał się dokładnie tym, czego zarzucano
+Pythonowi: zostawał w tyle za silnikiem. Najnowszy `whisper-rs-sys` wozi
+whisper.cpp 1.8.3, a więc bez Parakeeta, i to przesądziło. Dziś whisper.cpp
+jest submodułem, a wiązania są własne i wąskie — warstwa pośrednia w C++ trzyma
+wiedzę o układzie struktur silnika, przez granicę FFI idą tylko wskaźniki
+i liczby ([12-backendy-transkrypcji.md](12-backendy-transkrypcji.md),
+`crates/diktate-whispercpp-sys`).
 
 ### Audio czasu rzeczywistego
 
@@ -60,7 +66,7 @@ wyświetlania.
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ diktate-daemon                                           │
-│   audio (cpal) → VAD (Silero/ort) → whisper (whisper-rs) │
+│   audio (cpal) → VAD (Silero/ort) → whisper.cpp           │
 │   journal segmentów, serwer JSON-RPC na gnieździe UNIX    │
 └──────────────┬───────────────────────────────────────────┘
                │ $XDG_RUNTIME_DIR/diktate.sock
@@ -112,7 +118,7 @@ kompilacji, nie w runtime.
             SegmentQueue (bounded, domyślnie 8)
               │
               ▼
-            Transcriber (whisper-rs, Vulkan, model w pamięci)
+            Transcriber (whisper.cpp, Vulkan, model w pamięci)
               │ tekst segmentu
               ▼
             Filtry halucynacji ──► odrzucone znikają
@@ -157,7 +163,9 @@ całym nagraniu wstecz, a potrzebna jest decyzja na żywo.
 
 ### Transkrypcja
 
-`whisper-rs`. Model ładowany raz przy starcie daemona i trzymany w pamięci —
+whisper.cpp przez własne wiązania (`diktate-whispercpp-sys`); do wyboru
+whisper albo Parakeet ([12](12-backendy-transkrypcji.md)). Model ładowany raz
+przy starcie daemona i trzymany w pamięci —
 ładowanie `large-v3` zajmuje kilkanaście sekund i nie może się dziać per
 segment. Jeden dedykowany wątek transkrypcji.
 

@@ -62,9 +62,8 @@ Binarne pliki trafią do `target/debug/`.
 ### Backend transkrypcji: Vulkan domyślnie, CPU opcjonalnie
 
 `diktate-core` (i przekazujące dalej `diktate-cli`, `diktate-daemon`) ma cechę
-Cargo `vulkan`, która włącza backend GPU whisper.cpp przez `whisper-rs/vulkan`.
-**Od tej wersji jest domyślnie włączona** — zwykłe budowanie już z niej
-korzysta:
+Cargo `vulkan`, która włącza backend GPU w ggml. **Od tej wersji jest domyślnie
+włączona** — zwykłe budowanie już z niej korzysta:
 
 ```bash
 cargo build --workspace
@@ -97,47 +96,40 @@ cargo build --workspace --no-default-features
 
 (albo per-crate: `cargo build -p diktate-cli --no-default-features`).
 
-#### Historia problemu (dla przyszłych zmian tego kodu)
+Cecha dotyczy whispera. Parakeet, drugi model z tego samego drzewa
+whisper.cpp, liczy na rdzeniach **zawsze** — na tym iGPU jego enkoder jest
+2,5× wolniejszy niż na CPU, czyli odwrotnie niż u whispera
+([docs/12](docs/12-backendy-transkrypcji.md)).
 
-Włączenie cechy `vulkan` wcześniej kończyło się błędem `E0432 unresolved
-imports` w module `vulkan.rs` crate'a `whisper-rs` 0.14.4. Przyczyna:
-`.cargo/config.toml` ustawia `WHISPER_DONT_GENERATE_BINDINGS=1` (obejście
-niepowiązanego błędu bindgena z rozmiarami struktur glibc na tym systemie —
-patrz niżej), więc `whisper-rs-sys` zawsze używa dołączonych do paczki,
-gotowych bindingów FFI (`src/bindings.rs`) zamiast generować je na nowo. Te
-bindingi *nie* zawierają jednak deklaracji specyficznych dla Vulkana
-(`ggml_backend_vk_*`) — ale zawierają cały potrzebny zestaw *ogólnego* API
-rejestru backendów ggml (`ggml_backend_dev_*`, `ggml_backend_reg_*`), bo to
-część rdzenia ggml, nie coś dodawanego tylko przy włączonej cesze `vulkan`.
-Prawdziwym problemem okazał się sam `whisper-rs` 0.14.4: jego `src/vulkan.rs`
-woła stare, specyficzne dla Vulkana symbole (`ggml_backend_vk_get_device_count`
-i pokrewne), których whisper.cpp dołączone do `whisper-rs-sys` 0.13.1 już nie
-eksportuje — ggml przeszło na ogólne API rejestru backendów. To błąd
-niezgodności w samym `whisper-rs` 0.14.4, niezależny od tego systemu
-(wystąpiłby wszędzie z tą wersją whisper.cpp).
+### Skąd bierze się whisper.cpp
 
-Naprawiono to lokalną łatką przez `[patch.crates-io]` w głównym
-`Cargo.toml`, wskazującą na `vendor/whisper-rs-0.14.4` — kopię crate'a z
-przepisanym `src/vulkan.rs`, które odtwarza tę samą funkcjonalność
-(enumerację GPU, `list_devices()`) przez ogólne API rejestru backendów
-zamiast usuniętych symboli `ggml_backend_vk_*`. Publiczne API modułu
-(`VkDeviceInfo`, `VKVram`, `list_devices`) jest niezmienione. `whisper-rs-sys`
-**nie** jest łatane — bierze się wprost z crates.io, bez zmian.
+Silnik jest submodułem `vendor/whisper.cpp` przypiętym do wydania **v1.9.4**.
+Po świeżym sklonowaniu repozytorium trzeba raz:
 
-Sprawdzone i odrzucone ścieżki (dla porządku):
-- Podniesienie wersji do `whisper-rs` 0.16.0 / `whisper-rs-sys` 0.15.0: samo
-  bindgenowanie bindingów już wtedy działa (patrz niżej), ale `vulkan.rs`
-  bundled w 0.16.0 ma dokładnie ten sam problem z tymi samymi usuniętymi
-  symbolami — podniesienie wersji samo w sobie nic nie dawało.
-- Regeneracja bindingów przez bindgen z wyłączonym
-  `WHISPER_DONT_GENERATE_BINDINGS` okazała się niepotrzebna: generowanie
-  bindgenem faktycznie pada błędem `E0080` (`attempt to compute 1usize -
-  216usize, which would overflow`) przy wyliczaniu rozmiaru `_IO_FILE` i, w
-  konsekwencji, `whisper_full_params` — to potwierdzony, realny błąd
-  rozjazdu bindgen/rustc na tym systemie (bindgen 0.71.1 + clang 22 + glibc
-  2.43), naprawialny dodaniem `.rust_target(...)` do `build.rs`
-  `whisper-rs-sys` (potwierdzone eksperymentalnie), ale niepotrzebny do
-  odblokowania Vulkana, więc nie wszedł do tej łatki.
+```bash
+git submodule update --init
+```
+
+`WHISPER_CPP_DIR=/ścieżka/do/klonu` nadpisuje ten wybór, gdy ktoś ma już
+zbudowane drzewo whisper.cpp i nie chce kompilować go po raz drugi.
+
+Wiązania są własne i celowo wąskie: `crates/diktate-whispercpp-sys` buduje
+whisper.cpp przez cmake i wystawia kilka funkcji operujących na wskaźnikach
+i liczbach, a całą wiedzę o układzie struktur silnika trzyma warstwa
+pośrednia w C++ (`src/shim.cpp`). Powód jest konkretny: `whisper_full_params`
+ma 61 pól i jest przekazywana przez wartość, więc odwzorowanie jej w Ruście
+psułoby się przy każdej zmianie w whisper.cpp — bez błędu kompilacji, za to
+z przesuniętymi wartościami w czasie pracy.
+
+Wcześniej rolę tę pełnił crate `whisper-rs`. Odszedł, bo wiązania rustowe
+zostawały w tyle za silnikiem: najnowszy `whisper-rs-sys` wozi whisper.cpp
+1.8.3, czyli bez parakeeta, a używana wersja 0.14.4 — 1.7.4. Razem z nim
+zniknęły dwa obejścia: łatka `[patch.crates-io]` na `vendor/whisper-rs-0.14.4`
+(jego `vulkan.rs` wołał usunięte symbole `ggml_backend_vk_*`) i
+`WHISPER_DONT_GENERATE_BINDINGS=1` w `.cargo/config.toml` (bindgen 0.71
+z clang 22 i glibc 2.43 źle wyliczał rozmiar `_IO_FILE`, a w konsekwencji
+`whisper_full_params`). Oba były objawami tej samej choroby i żadne nie ma
+już czego leczyć.
 
 ## Uruchamianie
 
@@ -235,7 +227,7 @@ wartościami jako domyślnymi i listą różnic przed zapisem. `diktate setup
 
 | Crate | Opis |
 |-------|------|
-| `diktate-core` | Rdzeń: przechwytywanie (cpal), VAD (Silero), segmentacja, filtry halucynacji, transkrypcja (whisper-rs, domyślnie Vulkan). |
+| `diktate-core` | Rdzeń: przechwytywanie (cpal), VAD (Silero), segmentacja, filtry halucynacji, transkrypcja (whisper.cpp — whisper na Vulkanie albo Parakeet na CPU). |
 | `diktate-proto` | Typy protokołu IPC (JSON-RPC po gnieździe uniksowym). |
 | `diktate-document` | Model notatki: spany, kotwice, log operacji, cofanie. Bez audio, bez GTK. |
 | `diktate-config` | `daemon.toml` i `gtk.toml` — wczytywanie i walidacja. |

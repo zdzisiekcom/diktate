@@ -10,9 +10,13 @@
 mod cli;
 
 use anyhow::{anyhow, bail, Context, Result};
-use diktate_config::DaemonConfig;
+use diktate_config::{Backend, DaemonConfig};
 use diktate_core::segmenter::SegmenterConfig;
-use diktate_core::{transcribe::default_model_path, Session, SessionConfig, Transcriber};
+use diktate_core::{
+    parakeet::default_parakeet_model_path, transcribe::default_model_path, ParakeetTranscriber,
+    Session, SessionConfig, Transcribe,
+    Transcriber,
+};
 use diktate_proto::{
     pidfile, socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
     METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
@@ -47,15 +51,7 @@ fn main() -> Result<()> {
     // nie wracamy po cichu do wartości domyślnych (docs/04).
     let config = DaemonConfig::load().context("konfiguracja daemona")?;
 
-    let model = model_path(&config);
-    eprintln!("diktate-daemon: wczytuję model {}", model.display());
-    let transcriber = Arc::new(
-        Transcriber::new(&model)?
-            .with_language(config.whisper.language.clone())
-            .with_initial_prompt(config.whisper.initial_prompt.clone())
-            .with_beam_size(config.whisper.beam_size)
-            .with_threads(config.whisper.threads),
-    );
+    let transcriber = build_transcriber(&config)?;
 
     let path = socket_path();
     if path.exists() {
@@ -121,6 +117,57 @@ fn replace_running() {
     }
 }
 
+/// Buduje silnik transkrypcji wybrany przez `transcription.backend`
+/// (`docs/12-backendy-transkrypcji.md`). Oba warianty wczytują model przy
+/// starcie i oba potrafią wtedy odmówić. To celowe — daemon, który
+/// wystartował, ma transkrybować, a nie odkrywać przy pierwszym zdaniu, że
+/// nie ma czym.
+fn build_transcriber(config: &DaemonConfig) -> Result<Arc<dyn Transcribe>> {
+    match config.transcription.backend {
+        Backend::Whisper => {
+            let model = model_path(config);
+            eprintln!("diktate-daemon: wczytuję model {}", model.display());
+            Ok(Arc::new(
+                Transcriber::new(&model)?
+                    .with_language(config.whisper.language.clone())
+                    .with_initial_prompt(config.whisper.initial_prompt.clone())
+                    .with_beam_size(config.whisper.beam_size)
+                    .with_threads(config.whisper.threads),
+            ))
+        }
+        Backend::Parakeet => {
+            let model = parakeet_model_path(config);
+            eprintln!("diktate-daemon: wczytuję model parakeeta {}", model.display());
+            let transcriber = ParakeetTranscriber::open(&model, config.parakeet.threads)?;
+            eprintln!(
+                "diktate-daemon: parakeet gotów — {} wątków, minimum {:.1} s audio",
+                transcriber.threads(),
+                transcriber.min_audio_s()
+            );
+            warn_if_segments_too_short(config, transcriber.min_audio_s());
+            Ok(Arc::new(transcriber))
+        }
+    }
+}
+
+/// Ostrzega, gdy progi segmentacji domykają wypowiedzi krócej, niż model
+/// przyjmuje. Ostrzeżenie, nie odmowa startu: krótsze segmenty i tak polecą,
+/// tyle że dopełnione ciszą, a z dopełnionego audio model bierze byle jaki
+/// język. Zalecany profil `[vad]` jest w `docs/12`.
+fn warn_if_segments_too_short(config: &DaemonConfig, min_audio_s: f32) {
+    let typical_ms =
+        config.audio.pre_roll_ms + config.vad.long_segment_ms + config.vad.silence_ms_to_end_long;
+    let min_ms = (min_audio_s * 1_000.0).ceil() as u32;
+    if typical_ms < min_ms {
+        eprintln!(
+            "diktate-daemon: uwaga — typowa wypowiedź to ~{typical_ms} ms \
+             (pre_roll + long_segment_ms + silence_ms_to_end_long), a parakeet wymaga \
+             {min_ms} ms; większość segmentów pójdzie dopełniona ciszą. \
+             Zalecany profil [vad] dla parakeeta: docs/12-backendy-transkrypcji.md"
+        );
+    }
+}
+
 /// Ścieżka modelu: z `daemon.toml`, a gdy puste — `$DIKTATE_MODEL` albo
 /// ścieżka domyślna.
 fn model_path(config: &DaemonConfig) -> std::path::PathBuf {
@@ -128,6 +175,16 @@ fn model_path(config: &DaemonConfig) -> std::path::PathBuf {
         default_model_path()
     } else {
         std::path::PathBuf::from(&config.whisper.model)
+    }
+}
+
+/// To samo dla parakeeta: `parakeet.model`, a gdy puste —
+/// `$DIKTATE_PARAKEET_MODEL` albo ścieżka domyślna.
+fn parakeet_model_path(config: &DaemonConfig) -> std::path::PathBuf {
+    if config.parakeet.model.is_empty() {
+        default_parakeet_model_path()
+    } else {
+        std::path::PathBuf::from(&config.parakeet.model)
     }
 }
 
@@ -150,7 +207,7 @@ fn session_config(config: &DaemonConfig) -> SessionConfig {
     }
 }
 
-fn serve(stream: UnixStream, transcriber: &Arc<Transcriber>) -> Result<()> {
+fn serve(stream: UnixStream, transcriber: &Arc<dyn Transcribe>) -> Result<()> {
     let writer = stream
         .try_clone()
         .context("nie udało się sklonować gniazda")?;
