@@ -144,6 +144,34 @@ impl Default for VadConfig {
     }
 }
 
+/// Kontekst między segmentami po stronie daemona
+/// (`docs/01#kontekst-między-segmentami`).
+///
+/// Długość samego ogona dokumentu **nie** jest tutaj: tnie go klient, bo to
+/// on zna dokument. Daemon dostaje gotowy prompt i pilnuje tylko dwóch
+/// rzeczy — żeby nie był absurdalnie długi i żeby model go nie przepisał
+/// zamiast transkrypcji.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WhisperContextConfig {
+    /// Twardy limit długości promptu; nadmiar obcinany od początku.
+    pub max_prompt_chars: usize,
+    /// Czy segment będący echem promptu liczyć ponownie bez kontekstu.
+    pub repetition_guard: bool,
+    /// Podobieństwo, od którego segment uchodzi za echo.
+    pub repetition_threshold: f32,
+}
+
+impl Default for WhisperContextConfig {
+    fn default() -> Self {
+        Self {
+            max_prompt_chars: 900,
+            repetition_guard: true,
+            repetition_threshold: 0.8,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WhisperConfig {
@@ -157,6 +185,7 @@ pub struct WhisperConfig {
     pub beam_size: u32,
     /// Liczba wątków; 0 = tyle, ile rdzeni.
     pub threads: u32,
+    pub context: WhisperContextConfig,
 }
 
 impl Default for WhisperConfig {
@@ -167,6 +196,7 @@ impl Default for WhisperConfig {
             initial_prompt: String::new(),
             beam_size: 1,
             threads: 0,
+            context: WhisperContextConfig::default(),
         }
     }
 }
@@ -265,6 +295,29 @@ const WHISPER_WINDOW_MS: u32 = 30_000;
 
 // --- gtk.toml ---
 
+/// Prompt whispera po stronie klienta (`docs/07#kontekst-dla-whispera`).
+///
+/// Szablon jest tym, co użytkownik widzi w oknie ustawień, i dokładnie tym,
+/// co dostaje model: `{kontekst}` podmienia się na ogon tekstu sprzed
+/// kursora. Pusty szablon znaczy „nie wysyłaj kontekstu wcale" — daemon
+/// zostaje wtedy przy własnym `whisper.initial_prompt`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GtkWhisperConfig {
+    pub prompt: String,
+    /// Ile znaków przed punktem wstawiania wchodzi w `{kontekst}`.
+    pub context_chars: usize,
+}
+
+impl Default for GtkWhisperConfig {
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            context_chars: 200,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GtkConfig {
@@ -274,6 +327,7 @@ pub struct GtkConfig {
     pub shortcuts: ShortcutsConfig,
     pub tray: TrayConfig,
     pub correction: CorrectionConfig,
+    pub whisper: GtkWhisperConfig,
 }
 
 /// Co klient GUI robi, gdy daemon nie działa.
@@ -658,5 +712,50 @@ impl CorrectionConfig {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kontekst_whispera_ma_wartosci_domyslne() {
+        let cfg = DaemonConfig::from_toml("").unwrap();
+        assert_eq!(cfg.whisper.context.max_prompt_chars, 900);
+        assert!(cfg.whisper.context.repetition_guard);
+        assert!((cfg.whisper.context.repetition_threshold - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn kontekst_whispera_czyta_sie_z_pliku() {
+        let cfg = DaemonConfig::from_toml(
+            "[whisper.context]\nmax_prompt_chars = 400\nrepetition_guard = false\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.whisper.context.max_prompt_chars, 400);
+        assert!(!cfg.whisper.context.repetition_guard);
+    }
+
+    #[test]
+    fn nieznane_pole_kontekstu_jest_bledem() {
+        assert!(DaemonConfig::from_toml("[whisper.context]\nchars = 200\n").is_err());
+    }
+
+    #[test]
+    fn szablon_promptu_ma_wartosci_domyslne() {
+        let cfg = GtkConfig::from_toml("").unwrap();
+        assert_eq!(cfg.whisper.prompt, "");
+        assert_eq!(cfg.whisper.context_chars, 200);
+    }
+
+    #[test]
+    fn szablon_promptu_czyta_sie_z_pliku() {
+        let cfg = GtkConfig::from_toml(
+            "[whisper]\nprompt = \"Terminy: ggml.\\n{kontekst}\"\ncontext_chars = 400\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.whisper.prompt, "Terminy: ggml.\n{kontekst}");
+        assert_eq!(cfg.whisper.context_chars, 400);
     }
 }
