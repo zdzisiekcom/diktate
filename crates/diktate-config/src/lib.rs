@@ -40,7 +40,7 @@ fn read_or_default(path: &std::path::Path) -> Result<String> {
 
 // --- daemon.toml ---
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DaemonConfig {
     pub audio: AudioConfig,
@@ -52,7 +52,7 @@ pub struct DaemonConfig {
 }
 
 /// Który silnik zamienia dźwięk na tekst (`docs/12-backendy-transkrypcji.md`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TranscriptionConfig {
     pub backend: Backend,
@@ -80,7 +80,7 @@ pub enum Backend {
 /// Obie wartości domyślne są „puste" i to jest ich treść: pusta ścieżka
 /// znaczy „weź domyślną", a zero wątków — „wybierz sam". Stąd wyprowadzony
 /// `Default`, a nie wypisany ręcznie.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ParakeetConfig {
     /// Ścieżka modelu ggml; puste = `$DIKTATE_PARAKEET_MODEL` albo
@@ -91,7 +91,7 @@ pub struct ParakeetConfig {
     pub threads: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AudioConfig {
     /// Nazwa urządzenia wejściowego; `"default"` to urządzenie systemowe.
@@ -115,7 +115,7 @@ impl Default for AudioConfig {
 
 /// Progi segmentacji. Nazwy odpowiadają `SegmenterConfig` w `diktate-core` —
 /// to jedne i te same pokrętła, opisane w `docs/04`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct VadConfig {
     /// Próg decyzyjny Silero (0.0–1.0).
@@ -153,7 +153,7 @@ impl Default for VadConfig {
 /// on zna dokument. Daemon dostaje gotowy prompt i pilnuje tylko dwóch
 /// rzeczy — żeby nie był absurdalnie długi i żeby model go nie przepisał
 /// zamiast transkrypcji.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WhisperContextConfig {
     /// Twardy limit długości promptu; nadmiar obcinany od początku.
@@ -174,7 +174,7 @@ impl Default for WhisperContextConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WhisperConfig {
     /// Ścieżka modelu ggml; puste = `$DIKTATE_MODEL` albo ścieżka domyślna.
@@ -203,7 +203,7 @@ impl Default for WhisperConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct QueueConfig {
     /// Ile segmentów może czekać na transkrypcję. Limit jest celowy: mowa
@@ -310,7 +310,7 @@ const WHISPER_WINDOW_MS: u32 = 30_000;
 /// co dostaje model: `{kontekst}` podmienia się na ogon tekstu sprzed
 /// kursora. Pusty szablon znaczy „nie wysyłaj kontekstu wcale" — daemon
 /// zostaje wtedy przy własnym `whisper.initial_prompt`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GtkWhisperConfig {
     pub prompt: String,
@@ -327,7 +327,7 @@ impl Default for GtkWhisperConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GtkConfig {
     pub window: WindowConfig,
@@ -345,7 +345,7 @@ pub struct GtkConfig {
 /// jedną aplikacją, a nie usługą, którą trzeba pamiętać, żeby włączyć.
 /// Wyłączenie `autostart` zostawia decyzję systemowi — sensowne tam, gdzie
 /// daemon chodzi z `systemd --user`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GtkDaemonConfig {
     pub autostart: bool,
@@ -364,7 +364,7 @@ impl Default for GtkDaemonConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WindowConfig {
     pub width: i32,
@@ -384,7 +384,7 @@ impl Default for WindowConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DictationConfig {
     /// Segment wchodzi w miejscu karetki, nie na końcu notatki.
@@ -408,7 +408,7 @@ impl Default for DictationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ShortcutsConfig {
     pub copy: String,
@@ -430,7 +430,7 @@ impl Default for ShortcutsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TrayConfig {
     pub enabled: bool,
@@ -455,7 +455,7 @@ impl Default for TrayConfig {
 /// oczywistych błędów, a z promptem pokazującym przykłady napraw działa
 /// (`docs/11#prompt-decyduje-o-wszystkim`). Dobieranie promptu jest więc
 /// zwykłym strojeniem, nie zmianą programu.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CorrectionConfig {
     /// Czy przycisk korekty w ogóle jest w oknie. Wyłączony ukrywa go —

@@ -36,6 +36,9 @@ mod tests {
         cfg.whisper.context.max_prompt_chars = 401;
         cfg.whisper.context.repetition_guard = false;
         cfg.whisper.context.repetition_threshold = 0.42;
+        cfg.transcription.backend = diktate_config::Backend::Parakeet;
+        cfg.parakeet.model = "/tmp/parakeet.bin".to_string();
+        cfg.parakeet.threads = 3;
         cfg.queue.max_pending_segments = 17;
 
         let wczytany = DaemonConfig::from_toml(&daemon_toml(&cfg)).unwrap();
@@ -64,6 +67,10 @@ mod tests {
         cfg.tray.show_backlog = false;
         cfg.whisper.prompt = "Kontekst: {kontekst}\nDrugi wiersz szablonu.".to_string();
         cfg.whisper.context_chars = 351;
+        cfg.correction.redaction_system_prompt =
+            "Redaktor testowy.\nDrugi wiersz instrukcji.".to_string();
+        cfg.correction.redaction_user_template =
+            "Cel: {instruction}\n\nTekst:\n\n{text}".to_string();
 
         let wczytany = GtkConfig::from_toml(&gtk_toml(&cfg)).unwrap();
         let zmiany = diff::changes(&cfg, &wczytany).unwrap();

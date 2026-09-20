@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::{DaemonConfig, GtkConfig};
+use crate::{Backend, DaemonConfig, GtkConfig};
 
 /// Fragment pierwszej linii `daemon_toml`/`gtk_toml`. Po nim `save`
 /// rozpoznaje, czy plik docelowy jest wynikiem poprzedniego przebiegu
@@ -73,6 +73,13 @@ pub fn daemon_toml(cfg: &DaemonConfig) -> String {
         "twarde cięcie; okno whispera to 30 s",
     ));
 
+    out.push_str("\n[transcription]\n");
+    out.push_str(&field(
+        "backend",
+        backend_name(cfg.transcription.backend),
+        "silnik transkrypcji: \"whisper\" (wierny) albo \"parakeet\" (szybki podgląd, myli treść)",
+    ));
+
     out.push_str("\n[whisper]\n");
     out.push_str(&field(
         "model",
@@ -114,6 +121,18 @@ pub fn daemon_toml(cfg: &DaemonConfig) -> String {
     out.push_str(&format!(
         "repetition_threshold = {}  # podobieństwo, od którego segment uchodzi za echo\n",
         cfg.whisper.context.repetition_threshold
+    ));
+
+    out.push_str("\n[parakeet]\n");
+    out.push_str(&field(
+        "model",
+        &cfg.parakeet.model,
+        "ścieżka ggml; puste = $DIKTATE_PARAKEET_MODEL, potem ~/.diktate/models",
+    ));
+    out.push_str(&number(
+        "threads",
+        cfg.parakeet.threads,
+        "0 = tyle, ile widzi system",
     ));
 
     out.push_str("\n[queue]\n");
@@ -283,6 +302,16 @@ pub fn gtk_toml(cfg: &GtkConfig) -> String {
         &korekta.user_template,
         "{text} zastępuje treść notatki",
     ));
+    out.push_str(&text_block(
+        "redaction_system_prompt",
+        &korekta.redaction_system_prompt,
+        "instrukcja redaktora — wykonuje polecenie użytkownika, nie poprawia stylu",
+    ));
+    out.push_str(&field(
+        "redaction_user_template",
+        &korekta.redaction_user_template,
+        "{instruction} zastępuje polecenie, {text} — tekst celu",
+    ));
     out
 }
 
@@ -314,6 +343,16 @@ fn number(name: &str, value: u32, description: &str) -> String {
 
 fn flag(name: &str, value: bool, description: &str) -> String {
     format!("{name} = {value}  # {description}\n")
+}
+
+/// Nazwa wariantu `Backend`, dokładnie taka, jaką rozumie `serde`
+/// (`#[serde(rename_all = "lowercase")]`) — string tu i tam ma być ten sam,
+/// inaczej zapisany plik nie wczytałby się z powrotem.
+fn backend_name(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Whisper => "whisper",
+        Backend::Parakeet => "parakeet",
+    }
 }
 
 /// Kopia zapasowa, potem zapis atomowy: plik tymczasowy obok i `rename`.
@@ -362,45 +401,121 @@ pub fn save(path: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DaemonConfig, GtkConfig};
+    use crate::{Backend, DaemonConfig, GtkConfig};
 
+    /// Sieć bezpieczeństwa na całą strukturę: każde pole `DaemonConfig`
+    /// dostaje tu wartość inną niż domyślna (w tym prompty wielolinijkowe
+    /// i wariant enuma inny niż domyślny), a porównanie na końcu jest
+    /// porównaniem **całych struktur** przez `PartialEq`, nie wybranych pól.
+    /// Pole dodane kiedyś w `diktate-config` i zapomniane w `daemon_toml`
+    /// wywali ten test, zamiast zniknąć po cichu przy pierwszym zapisie
+    /// z okna ustawień (zadanie 10) — dokładnie to było zaległością z
+    /// zadania 5: nic dotąd nie przechodziło pełnego obiegu zapis → odczyt.
     #[test]
     fn zapisany_daemon_toml_da_się_wczytać_z_powrotem() {
-        let mut cfg = DaemonConfig::default();
-        cfg.whisper.language = "en".to_string();
-        cfg.vad.long_segment_ms = 4_000;
-        // Sekcja `[whisper.context]` dopisana w tym zadaniu — wartości
-        // niedomyślne, żeby zapis→odczyt naprawdę wykazał, że wraca to,
-        // co poszło na dysk.
-        cfg.whisper.context.max_prompt_chars = 400;
-        cfg.whisper.context.repetition_guard = false;
-        cfg.whisper.context.repetition_threshold = 0.65;
+        let cfg = DaemonConfig {
+            audio: crate::AudioConfig {
+                device: "hw:1".to_string(),
+                pre_roll_ms: 301,
+                level_interval_ms: 51,
+            },
+            vad: crate::VadConfig {
+                threshold: 0.6,
+                silence_ms_to_end: 1_600,
+                silence_ms_to_end_long: 201,
+                long_segment_ms: 2_501,
+                min_speech_ms: 301,
+                max_segment_ms: 15_001,
+            },
+            transcription: crate::TranscriptionConfig {
+                backend: Backend::Parakeet,
+            },
+            whisper: crate::WhisperConfig {
+                model: "/tmp/model.bin".to_string(),
+                language: "en".to_string(),
+                initial_prompt: "test prompt".to_string(),
+                beam_size: 2,
+                threads: 1,
+                context: crate::WhisperContextConfig {
+                    max_prompt_chars: 400,
+                    repetition_guard: false,
+                    repetition_threshold: 0.65,
+                },
+            },
+            parakeet: crate::ParakeetConfig {
+                model: "/tmp/parakeet.bin".to_string(),
+                threads: 3,
+            },
+            queue: crate::QueueConfig {
+                max_pending_segments: 17,
+            },
+        };
 
-        let text = daemon_toml(&cfg);
-        let wczytany = DaemonConfig::from_toml(&text).unwrap();
+        let wczytany = DaemonConfig::from_toml(&daemon_toml(&cfg)).unwrap();
 
-        assert_eq!(wczytany.whisper.language, "en");
-        assert_eq!(wczytany.vad.long_segment_ms, 4_000);
-        assert_eq!(wczytany.whisper.context.max_prompt_chars, 400);
-        assert!(!wczytany.whisper.context.repetition_guard);
-        assert!((wczytany.whisper.context.repetition_threshold - 0.65).abs() < f32::EPSILON);
+        assert_eq!(cfg, wczytany, "zapis→odczyt zgubił albo zmienił pole");
     }
 
+    /// Ten sam obieg co wyżej, dla `GtkConfig` — z promptami zawierającymi
+    /// `{kontekst}`, `{text}` i `{instruction}` oraz przełamaniami linii,
+    /// bo to właśnie ten kształt psuje naiwne renderowanie tekstu.
     #[test]
     fn zapisany_gtk_toml_da_się_wczytać_z_powrotem() {
-        let mut cfg = GtkConfig::default();
-        cfg.tray.enabled = false;
-        // Szablon promptu whispera dopisany w tym zadaniu — wielolinijkowy
-        // i z `{kontekst}`, żeby sprawdzić dokładnie ten przypadek, dla
-        // którego istnieje `text_block`.
-        cfg.whisper.prompt = "Terminy: ggml, whisper.\n{kontekst}".to_string();
-        cfg.whisper.context_chars = 350;
+        let cfg = GtkConfig {
+            window: crate::WindowConfig {
+                width: 621,
+                height: 421,
+                show_level_meter: false,
+            },
+            daemon: crate::GtkDaemonConfig {
+                autostart: false,
+                start_timeout_ms: 30_001,
+            },
+            dictation: crate::DictationConfig {
+                insert_at_cursor: false,
+                auto_space: false,
+                strip_trailing_ellipsis: false,
+                follow_caret: false,
+            },
+            shortcuts: crate::ShortcutsConfig {
+                copy: "<Control>x".to_string(),
+                undo: "<Control>y".to_string(),
+                redo: "<Control><Shift>y".to_string(),
+                toggle_recording: "<Control>v".to_string(),
+            },
+            tray: crate::TrayConfig {
+                enabled: false,
+                show_backlog: false,
+            },
+            correction: crate::CorrectionConfig {
+                enabled: false,
+                endpoint: "http://przyklad.test/v1/chat/completions".to_string(),
+                model: "model-testowy".to_string(),
+                api_key: "sekret".to_string(),
+                temperature: 0.3,
+                max_tokens: 500,
+                timeout_ms: 5_000,
+                disable_thinking: false,
+                system_prompt: "Prompt testowy.\nDrugi wiersz instrukcji.".to_string(),
+                user_template: "Szablon:\n\n{text}\nkoniec".to_string(),
+                redaction_system_prompt: "Redaktor testowy.\nDrugi wiersz.".to_string(),
+                redaction_user_template: "Cel: {instruction}\n\nTekst:\n\n{text}\nkoniec"
+                    .to_string(),
+                short_text_words: 10,
+                max_change_ratio_short: 0.3,
+                max_change_ratio_long: 0.2,
+                min_changed_words: 5,
+                allowed_extra_chars: "@#".to_string(),
+            },
+            whisper: crate::GtkWhisperConfig {
+                prompt: "Terminy: ggml, whisper.\n{kontekst}".to_string(),
+                context_chars: 350,
+            },
+        };
 
         let wczytany = GtkConfig::from_toml(&gtk_toml(&cfg)).unwrap();
 
-        assert!(!wczytany.tray.enabled);
-        assert_eq!(wczytany.whisper.prompt, "Terminy: ggml, whisper.\n{kontekst}");
-        assert_eq!(wczytany.whisper.context_chars, 350);
+        assert_eq!(cfg, wczytany, "zapis→odczyt zgubił albo zmienił pole");
     }
 
     #[test]
