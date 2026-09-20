@@ -35,6 +35,7 @@ mod correct;
 mod daemon;
 mod meter;
 mod redact;
+mod settings;
 mod shortcut;
 mod tray;
 mod view;
