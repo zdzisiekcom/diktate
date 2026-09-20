@@ -228,10 +228,6 @@ impl DocumentView {
     /// Przy zaznaczeniu liczy się jego **początek**: nowy tekst trafi w to
     /// miejsce, więc model ma widzieć to, co je poprzedza, a nie to, co
     /// zaraz zniknie.
-    ///
-    /// Okno podepnie to wywołanie dopiero w kolejnym zadaniu (wysyłka
-    /// kontekstu przy każdej wypowiedzi) — stąd `allow` niżej.
-    #[allow(dead_code)]
     pub fn context_before(&self, chars: usize) -> String {
         let start = self.buffer.start_iter();
         let cut = match self.buffer.selection_bounds() {

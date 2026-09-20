@@ -151,9 +151,6 @@ impl Client {
 
     /// Przysyła daemonowi gotowy prompt dla whispera. To **podpowiedź**:
     /// nieudana wysyłka nie jest awarią sesji, a pusty tekst czyści slot.
-    ///
-    /// Okno zacznie ją wołać dopiero w kolejnym zadaniu — stąd `allow` niżej.
-    #[allow(dead_code)]
     pub fn send_context(&self, text: &str) -> Result<()> {
         self.send_request(&Request::context(self.take_id(), text))
     }

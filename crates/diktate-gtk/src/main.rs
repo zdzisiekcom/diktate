@@ -30,6 +30,7 @@
 //! samo i żadne nie może zamazać pozostałych.
 
 mod client;
+mod context;
 mod correct;
 mod daemon;
 mod meter;
@@ -477,6 +478,7 @@ struct Ui {
     level_bar: LevelBar,
     record_button: ToggleButton,
     document: Rc<DocumentView>,
+    context: Rc<context::ContextSender>,
     tray: Option<TrayHandle>,
     show_level_meter: bool,
     gate: Rc<Gate>,
@@ -559,6 +561,7 @@ impl Ui {
             level_bar,
             record_button,
             document,
+            context,
             tray,
             show_level_meter,
             gate,
@@ -574,6 +577,9 @@ impl Ui {
                 eprintln!("diktate-gtk: nie udało się włączyć odczytów poziomu: {err:#}");
             }
         }
+        // Klient właśnie stanął — od tej chwili kontekst ma dokąd iść.
+        context.set_client(Rc::clone(&client));
+        context.send_now(&document);
         subtitle.set_session(SessionState::Idle, 0);
         record_button.set_sensitive(true);
         backlog_spinner.set_visible(false);
@@ -682,6 +688,10 @@ impl Ui {
             if let Err(err) = result {
                 subtitle.say(&format!("Błąd: {err}"));
                 button.set_active(false);
+            } else if button.is_active() {
+                // Pierwszy segment ma już mieć kontekst — nie dopiero ten
+                // po pierwszym odbiciu z bufora.
+                context.send_now(&document);
             }
         });
 
@@ -835,6 +845,10 @@ fn build_ui(app: &Application) {
     // a nie źródłem prawdy.
     let document = DocumentView::attach(&text_view, config.dictation.clone());
 
+    // Sender kontekstu whispera: żyje od razu, choć klient dociera dopiero
+    // z połączeniem w tle (`Ui::attach`) — patrz `context`.
+    let context_sender = context::ContextSender::new(config.whisper.clone());
+
     // Trwająca korekta albo redakcja: przyciski i podtytuł muszą o niej
     // wiedzieć niezależnie od siebie, a sygnał zmiany bufora chodzi też
     // w jej trakcie. Obie czynności dzielą tę jedną flagę — wykluczają się.
@@ -877,6 +891,8 @@ fn build_ui(app: &Application) {
     let correct_button_for_buffer = correct_button.clone();
     let busy_for_buffer = Rc::clone(&busy);
     let redact_button_for_buffer = redact_button.clone();
+    let context_sender_for_buffer = Rc::clone(&context_sender);
+    let document_for_buffer = Rc::clone(&document);
     buffer.connect_changed(move |buffer| {
         let empty = buffer.char_count() == 0;
         let page = if empty { PAGE_EMPTY } else { PAGE_TEXT };
@@ -888,6 +904,10 @@ fn build_ui(app: &Application) {
         // Redakcja rządzi się tym samym: w trakcie dyktowania jest czynna,
         // bo wypowiedzi sprzed otwarcia okna polecenia odsiewa znacznik.
         redact_button_for_buffer.set_sensitive(!empty && !busy_for_buffer.get());
+        // Kontekst dla whispera idzie po każdej zmianie notatki — z daemona
+        // i z klawiatury tak samo. Model ma widzieć wersję zatwierdzoną,
+        // a nie własną pomyłkę sprzed minuty (docs/07).
+        context_sender_for_buffer.schedule(&document_for_buffer);
     });
 
     // Bramka pilnuje, żeby żądanie nagrywania z pustego biurka nie przepadło
@@ -1004,6 +1024,7 @@ fn build_ui(app: &Application) {
         level_bar: level_bar.clone(),
         record_button: record_button.clone(),
         document: Rc::clone(&document),
+        context: Rc::clone(&context_sender),
         tray: tray_handle,
         show_level_meter: config.window.show_level_meter,
         gate,
