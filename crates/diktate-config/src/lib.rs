@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub mod render;
+
 /// Katalog konfiguracji: `$XDG_CONFIG_HOME/diktate`, z odwrotem na
 /// `~/.config/diktate`.
 pub fn config_dir() -> PathBuf {
@@ -235,6 +237,13 @@ impl DaemonConfig {
         let config: Self = toml::from_str(text).context("niepoprawny daemon.toml")?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Zapisuje konfigurację pod `Self::path()`: render z komentarzami,
+    /// kopia zapasowa, `rename`. Jedyna droga zapisu w całym projekcie —
+    /// kreator i okno ustawień idą tą samą (`docs/04`).
+    pub fn save(&self) -> Result<()> {
+        render::save(&Self::path(), &render::daemon_toml(self))
     }
 
     fn validate(&self) -> Result<()> {
@@ -598,6 +607,13 @@ impl GtkConfig {
         let config: Self = toml::from_str(text).context("niepoprawny gtk.toml")?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Zapisuje konfigurację pod `Self::path()`: render z komentarzami,
+    /// kopia zapasowa, `rename`. Jedyna droga zapisu w całym projekcie —
+    /// kreator i okno ustawień idą tą samą (`docs/04`).
+    pub fn save(&self) -> Result<()> {
+        render::save(&Self::path(), &render::gtk_toml(self))
     }
 
     fn validate(&self) -> Result<()> {
