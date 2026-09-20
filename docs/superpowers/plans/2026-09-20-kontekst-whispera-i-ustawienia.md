@@ -858,16 +858,35 @@ W `Response`:
     }
 ```
 
-- [ ] **Step 4: Testy**
+- [ ] **Step 4: Napraw jedyne miejsce, które psuje zmiana typu `params`**
 
-Run: `cargo test -p diktate-proto`
-Expected: PASS.
+Zmiana typu `Request::params` wywraca gałąź subskrypcji w daemonie
+(`crates/diktate-daemon/src/main.rs:327-331`). Napraw ją **w tym zadaniu**,
+żeby każdy commit zostawiał kompilujący się workspace:
 
-- [ ] **Step 5: Commit**
+```rust
+            METHOD_SESSION_SUBSCRIBE => {
+                let wanted = matches!(
+                    request.params,
+                    Some(RequestParams::Subscribe(Subscription { levels: true }))
+                );
+                levels_wanted.store(wanted, Ordering::Relaxed);
+                send(&writer, &Response::ok(request.id))?;
+            }
+```
+
+Uzupełnij import: `diktate_proto::{RequestParams, Subscription}`.
+
+- [ ] **Step 5: Testy i budowanie**
+
+Run: `cargo test -p diktate-proto && cargo build --workspace`
+Expected: PASS, workspace się buduje.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-cargo clippy -p diktate-proto --all-targets
-git add crates/diktate-proto/src/lib.rs
+cargo clippy -p diktate-proto -p diktate-daemon --all-targets
+git add crates/diktate-proto/src/lib.rs crates/diktate-daemon/src/main.rs
 git commit -m "feat(proto): metoda session.context i parametry żądania
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
@@ -1074,20 +1093,10 @@ Za gałęzią `METHOD_SESSION_SUBSCRIBE`:
             }
 ```
 
-Popraw też gałąź subskrypcji, bo `params` zmieniło typ:
-
-```rust
-            METHOD_SESSION_SUBSCRIBE => {
-                let wanted = matches!(
-                    request.params,
-                    Some(RequestParams::Subscribe(Subscription { levels: true }))
-                );
-                levels_wanted.store(wanted, Ordering::Relaxed);
-                send(&writer, &Response::ok(request.id))?;
-            }
-```
-
-Uzupełnij importy: `diktate_core::prompt::PromptSlot`, `diktate_proto::{METHOD_SESSION_CONTEXT, RequestParams, Subscription}`.
+Gałąź subskrypcji jest już naprawiona w zadaniu 4 — nie ruszaj jej.
+Uzupełnij importy: `diktate_core::prompt::PromptSlot`,
+`diktate_proto::METHOD_SESSION_CONTEXT` (`RequestParams` jest już
+zaimportowane).
 
 - [ ] **Step 4: Zbuduj i sprawdź test dymny**
 
@@ -1101,10 +1110,10 @@ Expected: test dymny przechodzi jak dotąd.
 
 - [ ] **Step 5: Dopisz krok kontekstu do testu dymnego**
 
-W `scripts/smoke-ipc.py`, przed wysłaniem `session.start`, dołóż wywołanie `session.context` z tekstem `"Terminy: ggml, Wayland.\nOstatnie zdanie notatki."` i asercję, że odpowiedź niesie `result["chars"] == 49`, a potem drugie wywołanie z pustym tekstem i asercją `chars == 0`. Trzymaj styl istniejących kroków w pliku (ta sama funkcja pomocnicza do żądania i odczytu odpowiedzi, komunikaty po polsku).
+W `scripts/smoke-ipc.py`, przed wysłaniem `session.start`, dołóż wywołanie `session.context` z tekstem `"Terminy: ggml, Wayland.\nOstatnie zdanie notatki."` i asercję, że odpowiedź niesie `result["chars"] == 48` (23 znaki + przełamanie + 24 znaki), a potem drugie wywołanie z pustym tekstem i asercją `chars == 0`. Trzymaj styl istniejących kroków w pliku (ta sama funkcja pomocnicza do żądania i odczytu odpowiedzi, komunikaty po polsku).
 
 Run: `python3 scripts/smoke-ipc.py`
-Expected: wszystkie kroki OK; w logu daemona `diktate-daemon: kontekst — 49 znaków`.
+Expected: wszystkie kroki OK; w logu daemona `diktate-daemon: kontekst — 48 znaków`.
 
 - [ ] **Step 6: Commit**
 
