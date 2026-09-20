@@ -774,7 +774,7 @@ fn build_ui(app: &Application) {
     // który zawsze kończy się błędem sieci, jest gorszy niż jego brak.
     let correct_button = gtk4::Button::builder()
         .icon_name("tools-check-spelling-symbolic")
-        .tooltip_text("Popraw tekst modelem językowym")
+        .tooltip_text("Popraw tekst modelem językowym (Super+D)")
         .sensitive(false)
         .visible(config.correction.enabled)
         .build();
@@ -782,7 +782,7 @@ fn build_ui(app: &Application) {
     // konfigurację — jeden serwer, jeden model, dwie różne instrukcje.
     let redact_button = gtk4::Button::builder()
         .icon_name("document-edit-symbolic")
-        .tooltip_text("Zredaguj poleceniem głosowym (Ctrl+E)")
+        .tooltip_text("Zredaguj poleceniem głosowym (Super+E)")
         .sensitive(false)
         .visible(config.correction.enabled)
         .build();
@@ -1043,21 +1043,31 @@ fn build_ui(app: &Application) {
     let shortcuts = gtk4::EventControllerKey::new();
     let document_for_keys = Rc::clone(&document);
     let redact_button_for_keys = redact_button.clone();
+    let correct_button_for_keys = correct_button.clone();
     shortcuts.connect_key_pressed(move |_, key, _, state| {
         let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
         let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+        let super_key = state.contains(gtk4::gdk::ModifierType::SUPER_MASK);
         match key {
             gtk4::gdk::Key::z if ctrl && !shift => {
                 document_for_keys.undo();
                 gtk4::glib::Propagation::Stop
             }
-            // Redakcja poleceniem głosowym. Skrót jest lokalny — dotyczy
-            // tekstu w tym oknie, więc nie ma po co zabierać kombinacji
-            // reszcie systemu. `Ctrl+R` jest zajęte przez ponowne
-            // podyktowanie zaznaczenia (`docs/06`), stąd `Ctrl+E`.
-            gtk4::gdk::Key::E | gtk4::gdk::Key::e if ctrl && !shift => {
+            // Redakcja poleceniem głosowym i korekta modelem stoją obok
+            // siebie na klawiszu `Super`, tak jak domknięcie `Super+C`.
+            // Kombinacje z `Ctrl` zostają dla pracy z tekstem (`Ctrl+R`,
+            // `Ctrl+Z`), a `Super` zbiera czynności aplikacji. Skróty są
+            // lokalne — dotyczą tekstu w tym oknie, więc nie zabierają
+            // kombinacji reszcie systemu (`docs/06`).
+            gtk4::gdk::Key::E | gtk4::gdk::Key::e if super_key && !shift => {
                 if redact_button_for_keys.is_sensitive() {
                     redact_button_for_keys.emit_clicked();
+                }
+                gtk4::glib::Propagation::Stop
+            }
+            gtk4::gdk::Key::D | gtk4::gdk::Key::d if super_key && !shift => {
+                if correct_button_for_keys.is_sensitive() {
+                    correct_button_for_keys.emit_clicked();
                 }
                 gtk4::glib::Propagation::Stop
             }

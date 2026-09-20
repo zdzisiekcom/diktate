@@ -60,7 +60,8 @@ zaznaczenie. Pełna semantyka: [07](07-zachowanie-dyktowania.md#zaznaczenie-i-za
 
 ### Przycisk korekty tekstu
 
-Ikona `tools-check-spelling-symbolic` w pasku nagłówka wysyła **całą** notatkę
+Ikona `tools-check-spelling-symbolic` w pasku nagłówka (skrót `Super+D`)
+wysyła **całą** notatkę
 do lokalnego modelu językowego i wstawia poprawioną wersję. Nieczynna przy
 pustej notatce i w trakcie trwającej korekty, niewidoczna przy
 `correction.enabled = false` — guzik, który zawsze kończy się błędem sieci,
@@ -78,7 +79,7 @@ własnymi słowami.
 
 ### Przycisk redakcji poleceniem głosowym
 
-Ikona `document-edit-symbolic` obok korekty (skrót `Ctrl+E`) otwiera okno
+Ikona `document-edit-symbolic` obok korekty (skrót `Super+E`) otwiera okno
 polecenia: użytkownik **mówi**, co zmienić — „zmień na bardziej formalny",
 „usuń powtórzenia", „przepisz w czasie przyszłym" — a model wykonuje to na
 zaznaczonym fragmencie albo, gdy nic nie jest zaznaczone, na całej notatce.
@@ -119,7 +120,8 @@ modelu dokumentu, więc `Ctrl+Z` cofa ją w całości. Szczegóły i zabezpiecze
 | `Ctrl+C` | Kopiuj całość do schowka |
 | `Super+C` | Kopiuj i zamknij (przycisk „OK”) |
 | `Ctrl+R` | Podyktuj ponownie zaznaczony fragment (jawne uzbrojenie; przy `implicit_replace` wystarczy zaznaczenie) |
-| `Ctrl+E` | Zredaguj poleceniem głosowym (zaznaczenie albo całą notatkę) |
+| `Super+E` | Zredaguj poleceniem głosowym (zaznaczenie albo całą notatkę) |
+| `Super+D` | Popraw tekst modelem językowym |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Cofnij / ponów |
 | `Ctrl+S` | Zapisz do historii |
 | `Ctrl+Space` | Pauza / wznowienie nagrywania |

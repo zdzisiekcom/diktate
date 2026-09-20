@@ -262,7 +262,7 @@ pyta „co whisper przekręcił" i ma **zakaz** zmiany stylu. Redakcja pyta „z
 z tym tekstem to, o co proszę" — instrukcją jest zdanie użytkownika, a nie
 prompt z konfiguracji.
 
-Przebieg: przycisk `document-edit-symbolic` (skrót `Ctrl+E`) otwiera okno
+Przebieg: przycisk `document-edit-symbolic` (skrót `Super+E`) otwiera okno
 polecenia, użytkownik **mówi** polecenie, model wykonuje je na zaznaczonym
 fragmencie albo, gdy nic nie jest zaznaczone, na całej notatce. Strona
 interfejsu: [06-gui.md](06-gui.md#przycisk-redakcji-poleceniem-głosowym).
