@@ -17,8 +17,8 @@ use diktate_core::{
     ParakeetTranscriber, Session, SessionConfig, Transcribe, Transcriber,
 };
 use diktate_proto::{
-    pidfile, socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
-    METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
+    pidfile, socket_path, Notification, Request, RequestParams, Response, SegmentAdded, SessionState, Subscription,
+    METHOD_SESSION_START, METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -332,7 +332,10 @@ fn serve(stream: UnixStream, transcriber: &Arc<dyn Transcribe>) -> Result<()> {
                 }
             }
             METHOD_SESSION_SUBSCRIBE => {
-                let wanted = request.params.unwrap_or_default().levels;
+                let wanted = matches!(
+                    request.params,
+                    Some(RequestParams::Subscribe(Subscription { levels: true }))
+                );
                 levels_wanted.store(wanted, Ordering::Relaxed);
                 send(&writer, &Response::ok(request.id))?;
             }
