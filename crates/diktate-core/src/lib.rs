@@ -9,6 +9,7 @@ pub mod capture;
 pub mod filters;
 pub mod level;
 pub mod parakeet;
+pub mod prompt;
 pub mod segmenter;
 pub mod session;
 pub mod transcribe;
