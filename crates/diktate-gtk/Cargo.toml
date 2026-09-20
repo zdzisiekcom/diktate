@@ -10,6 +10,13 @@ serde_json.workspace = true
 diktate-proto.workspace = true
 diktate-document.workspace = true
 diktate-config.workspace = true
+# Zależność podana wprost ścieżką (zamiast `diktate-core.workspace = true`),
+# żeby `default-features = false` faktycznie zadziałało — cargo ignoruje tę
+# opcję przy dziedziczeniu z workspace.dependencies, jeśli sam wpis w
+# workspace.dependencies nie deklaruje `default-features`. Klient używa stąd
+# tylko `prompt::tail`, czystej funkcji na łańcuchach znaków — nie robi
+# transkrypcji, więc cecha `vulkan` (backend whispera) jest mu niepotrzebna.
+diktate-core = { path = "../diktate-core", default-features = false }
 gtk4 = "0.9"
 async-channel = "2"
 libadwaita = { version = "0.7", features = ["v1_5"] }

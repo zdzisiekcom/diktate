@@ -222,6 +222,29 @@ impl DocumentView {
         self.document.borrow().text()
     }
 
+    /// Ogon tekstu przed punktem wstawiania — materiał na `{kontekst}`
+    /// w prompcie whispera (`docs/07-zachowanie-dyktowania.md#kontekst-dla-whispera`).
+    ///
+    /// Przy zaznaczeniu liczy się jego **początek**: nowy tekst trafi w to
+    /// miejsce, więc model ma widzieć to, co je poprzedza, a nie to, co
+    /// zaraz zniknie.
+    ///
+    /// Okno podepnie to wywołanie dopiero w kolejnym zadaniu (wysyłka
+    /// kontekstu przy każdej wypowiedzi) — stąd `allow` niżej.
+    #[allow(dead_code)]
+    pub fn context_before(&self, chars: usize) -> String {
+        let start = self.buffer.start_iter();
+        let cut = match self.buffer.selection_bounds() {
+            Some((from, _)) => from,
+            None => {
+                let mark = self.buffer.get_insert();
+                self.buffer.iter_at_mark(&mark)
+            }
+        };
+        let before = self.buffer.text(&start, &cut, false).to_string();
+        diktate_core::prompt::tail(&before, chars).to_string()
+    }
+
     /// Podmienia **całą** notatkę jedną operacją logu — tą drogą wchodzi
     /// korekta LLM-em (`docs/11-korekta-llm.md`). Jedna operacja, a nie
     /// kasowanie plus wstawienie, bo `Ctrl+Z` ma cofać korektę w całości,
@@ -759,5 +782,27 @@ mod tests {
         document.replace_all("Ala ma kota.");
         document.insert_segment(&segment(1, "I psa.", 1_000));
         assert_eq!(tekst(&document), "Ala ma kota. I psa.");
+
+        // Kontekst dla whispera to ogon tekstu przed karetką
+        // (`docs/07#kontekst-dla-whispera`), obcięty przez `prompt::tail`.
+        let document = przygotuj();
+        document.replace_all("Wczoraj zbudowałem wiązania rustowe do whisper.cpp.");
+        assert_eq!(document.context_before(12), "whisper.cpp.");
+
+        // Przy zaznaczeniu liczy się jego początek — nowy tekst tam trafi,
+        // więc model ma widzieć to, co je poprzedza, a nie to, co zniknie.
+        let document = przygotuj();
+        document.replace_all("pierwsze zdanie. drugie zdanie.");
+        zaznacz(&document, 17, 31);
+        assert_eq!(document.context_before(200), "pierwsze zdanie. ");
+
+        // Krótki tekst wchodzi w kontekst w całości.
+        let document = przygotuj();
+        document.replace_all("krótko");
+        assert_eq!(document.context_before(200), "krótko");
+
+        // Pusta notatka daje pusty kontekst.
+        let document = przygotuj();
+        assert_eq!(document.context_before(200), "");
     }
 }
