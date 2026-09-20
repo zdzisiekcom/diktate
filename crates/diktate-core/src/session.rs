@@ -346,7 +346,7 @@ fn run_transcriber<F, G: Fn(u32)>(
     while let Ok((seq, segment, queued_at)) = segment_rx.recv() {
         let waited = queued_at.elapsed();
         let started = Instant::now();
-        let result = transcriber.transcribe(&segment.audio);
+        let result = transcriber.transcribe(&segment.audio, "");
         // Diagnostyka rytmu: gdzie naprawdę schodzi czas między końcem
         // wypowiedzi a tekstem na ekranie. Oczekiwanie w kolejce rosnące
         // z segmentu na segment znaczy, że transkrypcja nie nadąża za mową

@@ -91,7 +91,9 @@ impl ParakeetTranscriber {
 }
 
 impl Transcribe for ParakeetTranscriber {
-    fn transcribe(&self, samples: &[f32]) -> Result<String> {
+    /// Prompt jest **ignorowany**: Parakeet nie przyjmuje podpowiedzi
+    /// kontekstowej i nie ma udawać, że przyjmuje (`docs/12`).
+    fn transcribe(&self, samples: &[f32], _prompt: &str) -> Result<String> {
         if samples.is_empty() {
             return Ok(String::new());
         }

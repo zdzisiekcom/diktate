@@ -25,7 +25,12 @@ use diktate_whispercpp_sys as sys;
 pub trait Transcribe: Send + Sync {
     /// Transkrybuje mono 16 kHz ([`crate::SAMPLE_RATE`]). Pusty wynik znaczy
     /// „nie rozpoznano mowy" i nie jest błędem.
-    fn transcribe(&self, samples: &[f32]) -> Result<String>;
+    ///
+    /// `prompt` to podpowiedź kontekstowa złożona przez klienta
+    /// (`docs/07#kontekst-dla-whispera`). Pusty prompt znaczy „weź własny
+    /// domyślny", a backend, który promptu nie przyjmuje, ma prawo go
+    /// zignorować — ale musi to powiedzieć w komentarzu.
+    fn transcribe(&self, samples: &[f32], prompt: &str) -> Result<String>;
 }
 
 /// Uchwyt kontekstu whisper.cpp.
@@ -101,12 +106,21 @@ impl Transcriber {
     }
 
     /// Transkrybuje mono 16 kHz. Zwraca sklejony tekst wszystkich segmentów.
-    pub fn transcribe(&self, samples: &[f32]) -> Result<String> {
+    ///
+    /// Pusty `prompt` cofa się do `initial_prompt` z konfiguracji daemona —
+    /// tak działają klienty, które kontekstu nie przysyłają (`diktate-cli`,
+    /// przykłady), i tak wyglądało zachowanie przed wprowadzeniem kontekstu.
+    pub fn transcribe(&self, samples: &[f32], prompt: &str) -> Result<String> {
         if samples.is_empty() {
             return Ok(String::new());
         }
         let language = cstring(&self.language)?;
-        let prompt = cstring(&self.initial_prompt)?;
+        let chosen = if prompt.is_empty() {
+            self.initial_prompt.as_str()
+        } else {
+            prompt
+        };
+        let prompt = cstring(chosen)?;
 
         let guard = self
             .ctx
@@ -133,8 +147,8 @@ impl Transcriber {
 }
 
 impl Transcribe for Transcriber {
-    fn transcribe(&self, samples: &[f32]) -> Result<String> {
-        Transcriber::transcribe(self, samples)
+    fn transcribe(&self, samples: &[f32], prompt: &str) -> Result<String> {
+        Transcriber::transcribe(self, samples, prompt)
     }
 }
 
@@ -195,6 +209,30 @@ pub(crate) fn models_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Atrapa silnika: zapisuje prompty, które dostała. Trait musi dać się
+    /// zaimplementować bez modelu — inaczej nie da się testować sesji.
+    struct Atrapa {
+        prompty: Mutex<Vec<String>>,
+    }
+
+    impl Transcribe for Atrapa {
+        fn transcribe(&self, _samples: &[f32], prompt: &str) -> Result<String> {
+            self.prompty.lock().unwrap().push(prompt.to_string());
+            Ok("tekst".to_string())
+        }
+    }
+
+    #[test]
+    fn trait_przekazuje_prompt_do_silnika() {
+        let atrapa = Atrapa {
+            prompty: Mutex::new(Vec::new()),
+        };
+        let silnik: &dyn Transcribe = &atrapa;
+        silnik.transcribe(&[0.0], "Terminy: ggml.").unwrap();
+        assert_eq!(atrapa.prompty.lock().unwrap().as_slice(), ["Terminy: ggml."]);
+    }
 
     #[test]
     fn join_segments_przycina_i_skleja_spacja() {

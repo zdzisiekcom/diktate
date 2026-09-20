@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     for (i, chunk) in samples.chunks(chunk_len.max(1)).enumerate() {
         let chunk_seconds = chunk.len() as f32 / SAMPLE_RATE as f32;
         let started = Instant::now();
-        let text = transcriber.transcribe(chunk)?;
+        let text = transcriber.transcribe(chunk, "")?;
         let ms = started.elapsed().as_millis();
         total_ms += ms;
         println!("kawałek {} ({chunk_seconds:.1} s): {ms} ms — {text}", i + 1);
