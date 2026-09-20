@@ -226,6 +226,7 @@ pub struct GtkConfig {
     pub dictation: DictationConfig,
     pub shortcuts: ShortcutsConfig,
     pub tray: TrayConfig,
+    pub correction: CorrectionConfig,
 }
 
 /// Co klient GUI robi, gdy daemon nie działa.
@@ -336,6 +337,131 @@ impl Default for TrayConfig {
     }
 }
 
+/// Korekta tekstu lokalnym modelem językowym (`docs/11-korekta-llm.md`).
+///
+/// Wszystko, co dotyczy modelu, jest tutaj — łącznie z promptem. Prompt jest
+/// polem konfiguracji, a nie stałą w kodzie, bo to **on** decyduje o całym
+/// zachowaniu korekty: ten sam model z promptem ostrożnym nie naprawia nawet
+/// oczywistych błędów, a z promptem pokazującym przykłady napraw działa
+/// (`docs/11#prompt-decyduje-o-wszystkim`). Dobieranie promptu jest więc
+/// zwykłym strojeniem, nie zmianą programu.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CorrectionConfig {
+    /// Czy przycisk korekty w ogóle jest w oknie. Wyłączony ukrywa go —
+    /// nie zostawiamy guzika, który zawsze kończy się błędem sieci.
+    pub enabled: bool,
+    /// Pełny adres punktu końcowego zgodnego z API OpenAI.
+    pub endpoint: String,
+    /// Nazwa modelu przekazywana w żądaniu. Serwer bywa przestawiany na inny
+    /// model, więc to pole trzeba trzymać w zgodzie z `/v1/models`.
+    pub model: String,
+    /// Klucz API; puste = nagłówek `Authorization` nie idzie wcale.
+    pub api_key: String,
+    pub temperature: f32,
+    pub max_tokens: u32,
+    /// Limit czasu całego żądania. Akapit potrafi zająć kilka sekund,
+    /// a model po podmianie na większy — wielokrotnie więcej.
+    pub timeout_ms: u64,
+    /// Wycisza rozumowanie u modeli, które je mają (`enable_thinking: false`
+    /// oraz `reasoning_effort: "none"`). Bielik je ignoruje, ale model
+    /// z domyślnie włączonym thinkingiem odpowiada bez tego 5–45× wolniej.
+    pub disable_thinking: bool,
+    /// Prompt systemowy — instrukcja korektora.
+    pub system_prompt: String,
+    /// Szablon wiadomości użytkownika; `{text}` zastępuje tekst notatki.
+    pub user_template: String,
+    /// Prompt systemowy redakcji poleceniem głosowym — instrukcja redaktora.
+    ///
+    /// Jest przeciwieństwem [`Self::system_prompt`]: korektor ma **zakaz**
+    /// zmiany stylu, a redaktor robi dokładnie to, o co poprosił użytkownik.
+    /// Zostają za to zakazy, które chronią treść: nie dopisuj od siebie, nie
+    /// ruszaj liczb i nazw własnych, oddaj sam tekst bez komentarza.
+    pub redaction_system_prompt: String,
+    /// Szablon wiadomości użytkownika przy redakcji. `{instruction}` zastępuje
+    /// polecenie podyktowane przez użytkownika, `{text}` — tekst celu
+    /// (zaznaczenie albo całą notatkę). Oba pola są obowiązkowe.
+    pub redaction_user_template: String,
+    /// Do tylu słów notatka jest „krótka" i obowiązuje ostrzejszy próg zmian.
+    pub short_text_words: usize,
+    /// Próg odsetka zmienionych słów dla krótkiej notatki — **luźniejszy**
+    /// niż dla długiej. W zdaniu z ośmiu słów dwie naprawy to już 25%, choć
+    /// jest to dokładnie ta robota, po którą sięga się po korektę; do tego
+    /// krótką notatkę użytkownik ogarnia wzrokiem i sam widzi, co się
+    /// zmieniło. Przekroczenie nie odrzuca korekty po cichu — pyta (`docs/11`).
+    pub max_change_ratio_short: f32,
+    /// Próg odsetka zmienionych słów dla dłuższej notatki — tu leży prawdziwe
+    /// ryzyko. Model puszczony na akapit zmienia 33–37% słów i oddaje tekst,
+    /// który czyta się lepiej, ale nie jest już wypowiedzią użytkownika,
+    /// a sprawdzić tego wzrokiem już się nie da.
+    pub max_change_ratio_long: f32,
+    /// Ile zmienionych słów przechodzi zawsze, bez pytania — niezależnie od
+    /// odsetka. W notatce z sześciu słów jedna uczciwa naprawa to już 17%
+    /// i sam odsetek alarmowałby przy każdej poprawnie wykonanej korekcie.
+    pub min_changed_words: usize,
+    /// Znaki dopuszczone w odpowiedzi ponad alfabet polski, cyfry
+    /// i interpunkcję. Walidacja znakowa wyłapuje model, który wstawia
+    /// w środek słów znaki spoza alfabetu — robił tak testowany `ornith`.
+    pub allowed_extra_chars: String,
+}
+
+/// Domyślny prompt korektora. Pochodzi wprost z pomiaru w `docs/11`: wersja
+/// bez przykładów napraw dawała model bierny, który nie ruszał nawet
+/// `ten wis per`.
+const DEFAULT_CORRECTION_PROMPT: &str = "\
+Poprawiasz transkrypcje z systemu rozpoznawania mowy. System często ROZBIJA \
+jedno słowo na kilka albo myli słowa podobnie brzmiące — Twoim głównym \
+zadaniem jest je odtworzyć.
+Przykłady napraw:
+  'ten wis per' → 'ten Whisper'
+  'w kontener że' → 'w kontenerze'
+  'morze tam być' → 'może tam być'
+  'na gita bie' → 'na GitHubie'
+Usuwaj też wtrącenia (eee, yyy, mmm) i znaczniki typu [muzyka], [śmiech].
+Wstawiaj interpunkcję i wielkie litery.
+ZAKAZY: nie dodawaj nowych treści, nie skracaj wypowiedzi, nie zmieniaj liczb \
+ani nazw technicznych, nie zmieniaj stylu. Fragment już poprawny zostaw \
+nietknięty.
+Odpowiadasz wyłącznie poprawionym tekstem.";
+
+/// Domyślny prompt redaktora. Redakcja odwraca umowę korekty: instrukcją jest
+/// polecenie użytkownika, więc prompt nie może go przykrywać własnymi
+/// zaleceniami co do stylu. Zostają zakazy chroniące treść — model, który
+/// „przy okazji" dopisze zdanie albo poprawi liczbę, robi dokładnie tę szkodę,
+/// przed którą redakcja ma bronić (`docs/11`).
+const DEFAULT_REDACTION_PROMPT: &str = "\
+Redagujesz tekst według polecenia użytkownika. Polecenie jest jedyną \
+instrukcją, co zmienić — wykonaj je wiernie, także gdy każe zmienić styl, \
+skrócić albo przepisać wypowiedź.
+ZAKAZY: nie dodawaj treści, o którą nie proszono, nie zmieniaj liczb, nazw \
+własnych ani nazw technicznych, nie komentuj tego, co zrobiłeś, nie pytaj \
+o nic. Fragmentów, których polecenie nie dotyczy, nie ruszaj.
+Odpowiadasz wyłącznie zredagowanym tekstem.";
+
+impl Default for CorrectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: "http://home-host.tarpan-flops.ts.net:8080/v1/chat/completions".to_string(),
+            model: "bielik-11b-v3".to_string(),
+            api_key: String::new(),
+            temperature: 0.0,
+            max_tokens: 2_000,
+            timeout_ms: 120_000,
+            disable_thinking: true,
+            system_prompt: DEFAULT_CORRECTION_PROMPT.to_string(),
+            user_template: "Popraw:\n\n{text}".to_string(),
+            redaction_system_prompt: DEFAULT_REDACTION_PROMPT.to_string(),
+            redaction_user_template: "Polecenie: {instruction}\n\nTekst:\n\n{text}".to_string(),
+            short_text_words: 40,
+            max_change_ratio_short: 0.5,
+            max_change_ratio_long: 0.35,
+            min_changed_words: 2,
+            allowed_extra_chars: String::new(),
+        }
+    }
+}
+
 impl GtkConfig {
     pub fn path() -> PathBuf {
         config_dir().join("gtk.toml")
@@ -378,6 +504,91 @@ impl GtkConfig {
             if skrót.trim().is_empty() {
                 bail!("{nazwa} jest pusty — nie ma czego związać z akcją");
             }
+        }
+        self.correction.validate()?;
+        Ok(())
+    }
+}
+
+impl CorrectionConfig {
+    /// Próg zmian obowiązujący dla notatki o tylu słowach.
+    pub fn max_change_ratio(&self, words: usize) -> f32 {
+        if words <= self.short_text_words {
+            self.max_change_ratio_short
+        } else {
+            self.max_change_ratio_long
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        // Pola sprawdzamy także przy `enabled = false`: literówka w liczbie
+        // ma się odezwać wtedy, gdy ktoś ją wpisuje, a nie pół roku później
+        // przy włączaniu korekty.
+        if !(0.0..=2.0).contains(&self.temperature) {
+            bail!(
+                "correction.temperature musi mieścić się w 0.0–2.0, a jest {}",
+                self.temperature
+            );
+        }
+        if self.max_tokens == 0 {
+            bail!("correction.max_tokens musi być większe od zera");
+        }
+        if self.timeout_ms == 0 {
+            bail!("correction.timeout_ms musi być większe od zera");
+        }
+        for (nazwa, próg) in [
+            (
+                "correction.max_change_ratio_short",
+                self.max_change_ratio_short,
+            ),
+            (
+                "correction.max_change_ratio_long",
+                self.max_change_ratio_long,
+            ),
+        ] {
+            if !(0.0..=1.0).contains(&próg) {
+                bail!("{nazwa} to odsetek — musi mieścić się w 0.0–1.0, a jest {próg}");
+            }
+        }
+        if !self.user_template.contains("{text}") {
+            bail!(
+                "correction.user_template musi zawierać {{text}} — inaczej model \
+                 nie dostanie tekstu do poprawienia"
+            );
+        }
+        for pole in ["{instruction}", "{text}"] {
+            if !self.redaction_user_template.contains(pole) {
+                bail!(
+                    "correction.redaction_user_template musi zawierać {pole} — \
+                     inaczej model nie dostanie {}",
+                    if pole == "{instruction}" {
+                        "polecenia użytkownika"
+                    } else {
+                        "tekstu do zredagowania"
+                    }
+                );
+            }
+        }
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.endpoint.trim().is_empty() {
+            bail!("correction.endpoint jest pusty — nie ma dokąd wysłać tekstu");
+        }
+        if self.model.trim().is_empty() {
+            bail!("correction.model jest pusty — serwer nie wie, czym poprawiać");
+        }
+        if self.system_prompt.trim().is_empty() {
+            bail!(
+                "correction.system_prompt jest pusty — bez instrukcji korektora \
+                 model redaguje zamiast poprawiać"
+            );
+        }
+        if self.redaction_system_prompt.trim().is_empty() {
+            bail!(
+                "correction.redaction_system_prompt jest pusty — bez instrukcji \
+                 redaktora model komentuje polecenie zamiast je wykonać"
+            );
         }
         Ok(())
     }

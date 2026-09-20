@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use diktate_config::{DaemonConfig, GtkConfig};
 
 use crate::model::{catalog, cmd};
-use crate::setup::{diff, dialog, profile, write};
+use crate::setup::{dialog, diff, profile, write};
 
 pub fn run(advanced: bool) -> Result<()> {
     println!("Kreator konfiguracji Diktate.");
@@ -22,7 +22,11 @@ pub fn run(advanced: bool) -> Result<()> {
     let options: Vec<String> = catalog::MODELS
         .iter()
         .map(|m| {
-            let state = if m.installed().is_some() { " [masz]" } else { "" };
+            let state = if m.installed().is_some() {
+                " [masz]"
+            } else {
+                ""
+            };
             format!(
                 "{:<22} {:>7}  {:>4.1} s/20 s  polszczyzna: {}{state}",
                 m.name,
@@ -69,14 +73,15 @@ pub fn run(advanced: bool) -> Result<()> {
     }
 
     // --- język ---
-    daemon.whisper.language =
-        dialog::ask_text("Język transkrypcji (kod ISO albo \"auto\")", &daemon.whisper.language)?;
+    daemon.whisper.language = dialog::ask_text(
+        "Język transkrypcji (kod ISO albo \"auto\")",
+        &daemon.whisper.language,
+    )?;
 
     // --- urządzenie ---
     let devices = input_devices();
     if devices.is_empty() {
-        daemon.audio.device =
-            dialog::ask_text("Urządzenie wejściowe", &daemon.audio.device)?;
+        daemon.audio.device = dialog::ask_text("Urządzenie wejściowe", &daemon.audio.device)?;
     } else {
         let mut options = vec!["default (urządzenie systemowe)".to_string()];
         options.extend(devices.iter().cloned());
@@ -105,7 +110,12 @@ pub fn run(advanced: bool) -> Result<()> {
         // odpowiedź pod Enterem.
         let mut options: Vec<String> = profile::RHYTHMS
             .iter()
-            .map(|r| format!("{:<14} {} ms — {}", r.name, r.long_segment_ms, r.description))
+            .map(|r| {
+                format!(
+                    "{:<14} {} ms — {}",
+                    r.name, r.long_segment_ms, r.description
+                )
+            })
             .collect();
         let own_index = if profile::current(&daemon).is_none() {
             options.push(format!(
@@ -139,7 +149,9 @@ pub fn run(advanced: bool) -> Result<()> {
                     "\nUwaga: przy modelu {} segment w tym rytmie kosztuje więcej, niż trwa.",
                     model.name
                 );
-                println!("Kolejka będzie rosła, a tekst pojawiał się coraz później, nie wcześniej.");
+                println!(
+                    "Kolejka będzie rosła, a tekst pojawiał się coraz później, nie wcześniej."
+                );
                 if !dialog::ask_bool("Mimo to ustawić ten rytm?", false)? {
                     continue;
                 }
@@ -341,10 +353,14 @@ fn ask_rest(daemon: &mut DaemonConfig, gtk: &mut GtkConfig) -> Result<()> {
     println!("\n--- Pozostałe pola gtk.toml ---");
     gtk.window.width = dialog::ask_u32("window.width", gtk.window.width as u32)? as i32;
     gtk.window.height = dialog::ask_u32("window.height", gtk.window.height as u32)? as i32;
-    gtk.window.show_level_meter =
-        dialog::ask_bool("window.show_level_meter — wskaźnik poziomu?", gtk.window.show_level_meter)?;
-    gtk.daemon.autostart =
-        dialog::ask_bool("daemon.autostart — klient sam uruchamia daemona?", gtk.daemon.autostart)?;
+    gtk.window.show_level_meter = dialog::ask_bool(
+        "window.show_level_meter — wskaźnik poziomu?",
+        gtk.window.show_level_meter,
+    )?;
+    gtk.daemon.autostart = dialog::ask_bool(
+        "daemon.autostart — klient sam uruchamia daemona?",
+        gtk.daemon.autostart,
+    )?;
     gtk.daemon.start_timeout_ms = dialog::ask_u32(
         "daemon.start_timeout_ms — ile czekać na gniazdo",
         gtk.daemon.start_timeout_ms as u32,
@@ -353,8 +369,10 @@ fn ask_rest(daemon: &mut DaemonConfig, gtk: &mut GtkConfig) -> Result<()> {
         "dictation.insert_at_cursor — wstawiać w miejscu karetki?",
         gtk.dictation.insert_at_cursor,
     )?;
-    gtk.dictation.auto_space =
-        dialog::ask_bool("dictation.auto_space — spacja na stykach?", gtk.dictation.auto_space)?;
+    gtk.dictation.auto_space = dialog::ask_bool(
+        "dictation.auto_space — spacja na stykach?",
+        gtk.dictation.auto_space,
+    )?;
     gtk.dictation.strip_trailing_ellipsis = dialog::ask_bool(
         "dictation.strip_trailing_ellipsis — usuwać końcowy wielokropek?",
         gtk.dictation.strip_trailing_ellipsis,
@@ -366,7 +384,28 @@ fn ask_rest(daemon: &mut DaemonConfig, gtk: &mut GtkConfig) -> Result<()> {
     gtk.shortcuts.copy = dialog::ask_text("shortcuts.copy", &gtk.shortcuts.copy)?;
     gtk.shortcuts.undo = dialog::ask_text("shortcuts.undo", &gtk.shortcuts.undo)?;
     gtk.shortcuts.redo = dialog::ask_text("shortcuts.redo", &gtk.shortcuts.redo)?;
-    gtk.tray.show_backlog =
-        dialog::ask_bool("tray.show_backlog — licznik zaległości na ikonie?", gtk.tray.show_backlog)?;
+    gtk.tray.show_backlog = dialog::ask_bool(
+        "tray.show_backlog — licznik zaległości na ikonie?",
+        gtk.tray.show_backlog,
+    )?;
+
+    // Prompt korektora zostaje przy pliku: to kilka akapitów tekstu, a dialog
+    // w terminalu czyta jedną linię. Kreator pyta o resztę i mówi, gdzie
+    // prompt znaleźć (`docs/11`).
+    gtk.correction.enabled = dialog::ask_bool(
+        "correction.enabled — przycisk korekty tekstu modelem językowym?",
+        gtk.correction.enabled,
+    )?;
+    if gtk.correction.enabled {
+        gtk.correction.endpoint = dialog::ask_text(
+            "correction.endpoint — adres API zgodnego z OpenAI",
+            &gtk.correction.endpoint,
+        )?;
+        gtk.correction.model = dialog::ask_text(
+            "correction.model — nazwa modelu na serwerze",
+            &gtk.correction.model,
+        )?;
+        println!("  (prompt korektora edytuje się w gtk.toml, w polu correction.system_prompt)");
+    }
     Ok(())
 }

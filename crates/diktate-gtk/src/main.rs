@@ -1,7 +1,10 @@
 //! Okno dyktowania.
 //!
-//! Jedno okno: przycisk przełączający nagrywanie, `TextView` na tekst
-//! oraz dwa przyciski wyjścia — „Kopiuj" i „OK". „OK" (skrót lokalny
+//! Jedno okno: przycisk przełączający nagrywanie, `TextView` na tekst,
+//! przyciski czyszczenia, korekty tekstu modelem językowym (patrz
+//! [`correct`] i `docs/11-korekta-llm.md`) i redakcji poleceniem
+//! podyktowanym głosem ([`redact`]) oraz dwa przyciski wyjścia —
+//! „Kopiuj" i „OK". „OK" (skrót lokalny
 //! `Super+C`) domyka dyktowanie jednym ruchem: zatrzymuje nagrywanie,
 //! kopiuje całość do schowka i zamyka okno — ale dopiero, gdy kolejka
 //! transkrypcji ucichnie, żeby nie zjeść ostatniego zdania; patrz
@@ -22,10 +25,15 @@
 //! kliknięcie przycisku nagrywania nie zgaduje tekstu podtytułu, tylko czeka
 //! na potwierdzenie. Ikona mikrofonu pulsuje w trakcie nagrywania, a `Spinner`
 //! obok tytułu pokazuje się, dopóki jest cokolwiek w kolejce transkrypcji.
+//! Podtytuł składa [`Subtitle`] z trzech niezależnych źródeł — stanu sesji,
+//! uzbrojonego zastąpienia i trwającej korekty — bo każde z nich zmienia się
+//! samo i żadne nie może zamazać pozostałych.
 
 mod client;
+mod correct;
 mod daemon;
 mod meter;
+mod redact;
 mod shortcut;
 mod tray;
 mod view;
@@ -200,18 +208,88 @@ fn backlog_phrase(n: u32) -> String {
     format!("{n} {}", wypowiedzi_word(n))
 }
 
-/// Tekst podtytułu na podstawie stanu sesji i liczby zaległości. Wywoływana
-/// wyłącznie z obsługi `Incoming::State` — podtytuł nigdy nie jest zgadywany
-/// na podstawie samego kliknięcia przycisku.
-/// Podtytuł składany z dwóch niezależnych rzeczy: stanu sesji i tego, czy
-/// zaznaczenie czeka na zastąpienie. Uzbrojenie idzie na początek, bo jest
-/// stanem chwilowym — użytkownik ma je zobaczyć, zanim zacznie mówić.
-fn subtitle_with_replace(state: SessionState, backlog: u32, armed: bool) -> String {
-    let base = subtitle_for_state(state, backlog);
+/// Podtytuł składany z trzech niezależnych rzeczy: stanu sesji, uzbrojonego
+/// zastąpienia i czynności zajmującej okno (korekta albo redakcja). Stany chwilowe idą na początek, bo to je
+/// użytkownik ma zobaczyć — stan sesji jest tłem, które i tak widzi ikoną
+/// mikrofonu.
+///
+/// Sam stan sesji nigdy nie jest zgadywany z kliknięcia przycisku: bierze się
+/// wyłącznie z powiadomienia `state.changed` (`docs/06`).
+fn compose_subtitle(state: SessionState, backlog: u32, armed: bool, busy: Option<&str>) -> String {
+    let mut out = subtitle_for_state(state, backlog);
     if armed {
-        format!("Zastępuję… · {base}")
-    } else {
-        base
+        out = format!("Zastępuję… · {out}");
+    }
+    if let Some(czynność) = busy {
+        out = format!("{czynność} · {out}");
+    }
+    out
+}
+
+/// Nazwy czynności zajmujących okno. Jedno gniazdo, bo korekta i redakcja
+/// wykluczają się nawzajem — obie chodzą do tego samego modelu i obie
+/// podmieniają tekst, więc druga w trakcie pierwszej nie miałaby czego
+/// poprawiać.
+const BUSY_CORRECTING: &str = "Poprawiam tekst…";
+const BUSY_REDACTING: &str = "Redaguję tekst…";
+
+/// Podtytuł okna wraz ze wszystkim, z czego się składa.
+///
+/// Trzy niezależne źródła piszą w to samo miejsce, więc żadne z nich nie może
+/// znać całego tekstu — każde zmienia swoją część i prosi o przerysowanie.
+/// Bez tego korekta zamazywałaby „zastępuję…”, a stan z daemona zamazywałby
+/// jedno i drugie.
+struct Subtitle {
+    title: WindowTitle,
+    session: Cell<(SessionState, u32)>,
+    armed: Cell<bool>,
+    busy: Cell<Option<&'static str>>,
+}
+
+impl Subtitle {
+    fn new(title: WindowTitle) -> Self {
+        Self {
+            title,
+            session: Cell::new((SessionState::Idle, 0)),
+            armed: Cell::new(false),
+            busy: Cell::new(None),
+        }
+    }
+
+    fn session(&self) -> (SessionState, u32) {
+        self.session.get()
+    }
+
+    fn set_session(&self, state: SessionState, backlog: u32) {
+        self.session.set((state, backlog));
+        self.refresh();
+    }
+
+    fn set_armed(&self, armed: bool) {
+        self.armed.set(armed);
+        self.refresh();
+    }
+
+    /// Ogłasza czynność zajmującą okno — albo jej koniec (`None`).
+    fn set_busy(&self, busy: Option<&'static str>) {
+        self.busy.set(busy);
+        self.refresh();
+    }
+
+    /// Komunikat, który wypiera złożony podtytuł do czasu następnej zmiany
+    /// stanu — brak daemona, zerwane połączenie, błąd `session.start`.
+    fn say(&self, text: &str) {
+        self.title.set_subtitle(text);
+    }
+
+    fn refresh(&self) {
+        let (state, backlog) = self.session.get();
+        self.title.set_subtitle(&compose_subtitle(
+            state,
+            backlog,
+            self.armed.get(),
+            self.busy.get(),
+        ));
     }
 }
 
@@ -375,8 +453,8 @@ fn connecting_subtitle(link: Link, pending: bool) -> &'static str {
 /// wyłącznie wtedy, gdy jest odłożone żądanie, żeby zwykły start okna nie
 /// migotał bez powodu. Po połączeniu ten sam spinner przejmuje licznik
 /// zaległości transkrypcji.
-fn show_connecting(window_title: &WindowTitle, spinner: &Spinner, gate: &Gate) {
-    window_title.set_subtitle(connecting_subtitle(gate.link(), gate.pending()));
+fn show_connecting(subtitle: &Subtitle, spinner: &Spinner, gate: &Gate) {
+    subtitle.say(connecting_subtitle(gate.link(), gate.pending()));
     if gate.pending() {
         spinner.set_visible(true);
         spinner.start();
@@ -393,18 +471,18 @@ fn show_connecting(window_title: &WindowTitle, spinner: &Spinner, gate: &Gate) {
 /// łączącego. Bez tej struktury każdy widżet trzeba by klonować z osobna
 /// do bloku `async`.
 struct Ui {
-    window_title: WindowTitle,
+    /// Podtytuł wraz ze wszystkim, co się na niego składa.
+    subtitle: Rc<Subtitle>,
     backlog_spinner: Spinner,
     level_bar: LevelBar,
     record_button: ToggleButton,
     document: Rc<DocumentView>,
-    /// Stan sesji widziany ostatnio — podtytuł składa się z niego i z
-    /// uzbrojenia zastąpienia, więc żadne z dwóch nie może go zamazać.
-    status: Rc<Cell<(SessionState, u32)>>,
     tray: Option<TrayHandle>,
     show_level_meter: bool,
     gate: Rc<Gate>,
     accept: Rc<Accept>,
+    /// Rozgałęzienie wypowiedzi: notatka albo pole polecenia redakcji.
+    sink: Rc<redact::Sink>,
 }
 
 /// Co wątek łączący ma do powiedzenia oknu.
@@ -440,7 +518,7 @@ fn spawn_connect(ui: Ui, config: diktate_config::GtkDaemonConfig) {
         let _ = tx.send_blocking(event);
     });
 
-    let window_title = ui.window_title.clone();
+    let subtitle = Rc::clone(&ui.subtitle);
     let backlog_spinner = ui.backlog_spinner.clone();
     let gate = Rc::clone(&ui.gate);
     // `Option` zamiast zwykłego przeniesienia: kompilator nie wie, że
@@ -452,7 +530,7 @@ fn spawn_connect(ui: Ui, config: diktate_config::GtkDaemonConfig) {
             match event {
                 ConnectEvent::Spawning => {
                     gate.spawning();
-                    show_connecting(&window_title, &backlog_spinner, &gate);
+                    show_connecting(&subtitle, &backlog_spinner, &gate);
                 }
                 ConnectEvent::Ready(client) => {
                     if let Some(ui) = ui.take() {
@@ -464,7 +542,7 @@ fn spawn_connect(ui: Ui, config: diktate_config::GtkDaemonConfig) {
                     gate.lost();
                     backlog_spinner.stop();
                     backlog_spinner.set_visible(false);
-                    window_title.set_subtitle(&format!("Brak daemona: {message}"));
+                    subtitle.say(&format!("Brak daemona: {message}"));
                     break;
                 }
             }
@@ -476,16 +554,16 @@ impl Ui {
     /// Podłącza gotowego klienta: strumień powiadomień i przycisk nagrywania.
     fn attach(self, client: Rc<Client>) {
         let Ui {
-            window_title,
+            subtitle,
             backlog_spinner,
             level_bar,
             record_button,
             document,
-            status,
             tray,
             show_level_meter,
             gate,
             accept,
+            sink,
         } = self;
 
         // Odczyty poziomu przychodzą tylko na prośbę — to kilkanaście
@@ -496,7 +574,7 @@ impl Ui {
                 eprintln!("diktate-gtk: nie udało się włączyć odczytów poziomu: {err:#}");
             }
         }
-        window_title.set_subtitle("Gotowe");
+        subtitle.set_session(SessionState::Idle, 0);
         record_button.set_sensitive(true);
         backlog_spinner.set_visible(false);
         backlog_spinner.stop();
@@ -506,36 +584,39 @@ impl Ui {
         // i widoczność spinnera zaległości.
         let incoming = client.incoming();
         let document_for_incoming = Rc::clone(&document);
-        let window_title_for_incoming = window_title.clone();
+        let subtitle_for_incoming = Rc::clone(&subtitle);
         let backlog_spinner_for_incoming = backlog_spinner.clone();
         let level_bar_for_incoming = level_bar.clone();
         let record_button_for_incoming = record_button.clone();
-        let status_for_incoming = Rc::clone(&status);
         let gate_for_incoming = Rc::clone(&gate);
         let accept_for_incoming = Rc::clone(&accept);
         gtk4::glib::spawn_future_local(async move {
             while let Ok(message) = incoming.recv().await {
                 match message {
                     Incoming::Segment(segment) => {
-                        document_for_incoming.insert_segment(&segment);
+                        // Gdy otwarte jest okno polecenia, wypowiedź jest
+                        // poleceniem redakcyjnym, a nie treścią notatki —
+                        // ale tylko wtedy, gdy padła po jego otwarciu.
+                        // Zaległość sprzed niego należy do notatki.
+                        let polecenie = sink.deliver(&segment.text, |mark| {
+                            document_for_incoming.spoken_after(mark, segment.audio_start_ms)
+                        });
+                        if !polecenie {
+                            document_for_incoming.insert_segment(&segment);
+                        }
                     }
                     Incoming::Level { rms } => {
                         level_bar_for_incoming.set_value(meter_value(rms));
                     }
                     Incoming::State { state, backlog } => {
-                        let (poprzedni, _) = status_for_incoming.get();
-                        status_for_incoming.set((state, backlog));
+                        let (poprzedni, _) = subtitle_for_incoming.session();
                         // Nowe nagranie zaczyna oś czasu audio od zera —
                         // model dokumentu musi wiedzieć, od kiedy ją liczyć.
                         if state == SessionState::Recording && poprzedni != SessionState::Recording
                         {
                             document_for_incoming.begin_audio_session();
                         }
-                        window_title_for_incoming.set_subtitle(&subtitle_with_replace(
-                            state,
-                            backlog,
-                            document_for_incoming.is_armed(),
-                        ));
+                        subtitle_for_incoming.set_session(state, backlog);
                         if let Some(handle) = &tray {
                             handle.update(|tray| {
                                 tray.set_state(state == SessionState::Recording, backlog)
@@ -579,7 +660,7 @@ impl Ui {
             // nadpisać komunikatem o błędzie.
             record_button_for_incoming.set_active(false);
             record_button_for_incoming.set_sensitive(false);
-            window_title_for_incoming.set_subtitle("Daemon się rozłączył");
+            subtitle_for_incoming.say("Daemon się rozłączył");
         });
 
         record_button.connect_toggled(move |button| {
@@ -599,7 +680,7 @@ impl Ui {
                 client.stop()
             };
             if let Err(err) = result {
-                window_title.set_subtitle(&format!("Błąd: {err}"));
+                subtitle.say(&format!("Błąd: {err}"));
                 button.set_active(false);
             }
         });
@@ -679,9 +760,32 @@ fn build_ui(app: &Application) {
         .icon_name("edit-copy-symbolic")
         .tooltip_text("Kopiuj do schowka")
         .build();
+    // Czyszczenie stoi przed kopiowaniem i jest nieczynne przy pustej
+    // notatce — nie ma wtedy czego usuwać.
+    let clear_button = gtk4::Button::builder()
+        .icon_name("edit-clear-all-symbolic")
+        .tooltip_text("Wyczyść tekst")
+        .sensitive(false)
+        .build();
     // Przycisk domykający: kopiuje i zamyka okno jednym ruchem. Jako
     // czynność sugerowana (`suggested-action`) stoi po prawej stronie
     // paska nagłówka — tak GNOME oznacza główne wyjście z widoku.
+    // Korekta LLM-em: widoczna tylko wtedy, gdy jest skonfigurowana. Guzik,
+    // który zawsze kończy się błędem sieci, jest gorszy niż jego brak.
+    let correct_button = gtk4::Button::builder()
+        .icon_name("tools-check-spelling-symbolic")
+        .tooltip_text("Popraw tekst modelem językowym")
+        .sensitive(false)
+        .visible(config.correction.enabled)
+        .build();
+    // Redakcja poleceniem głosowym stoi obok korekty i dzieli z nią
+    // konfigurację — jeden serwer, jeden model, dwie różne instrukcje.
+    let redact_button = gtk4::Button::builder()
+        .icon_name("document-edit-symbolic")
+        .tooltip_text("Zredaguj poleceniem głosowym (Ctrl+E)")
+        .sensitive(false)
+        .visible(config.correction.enabled)
+        .build();
     let accept_button = gtk4::Button::builder()
         .label("OK")
         .tooltip_text("Kopiuj, zamknij nagrywanie i okno (Super+C)")
@@ -693,6 +797,9 @@ fn build_ui(app: &Application) {
     header.pack_start(&record_button);
     header.pack_end(&accept_button);
     header.pack_end(&copy_button);
+    header.pack_end(&clear_button);
+    header.pack_end(&correct_button);
+    header.pack_end(&redact_button);
 
     // Wskaźnik poziomu tuż pod paskiem nagłówka: widoczny wyłącznie w trakcie
     // nagrywania, bo poza nim nie ma czego pokazywać.
@@ -728,9 +835,18 @@ fn build_ui(app: &Application) {
     // a nie źródłem prawdy.
     let document = DocumentView::attach(&text_view, config.dictation.clone());
 
-    // Stan sesji trzymany osobno: podtytuł powstaje z niego i z uzbrojenia
-    // zastąpienia, a te dwie rzeczy zmieniają się niezależnie.
-    let status = Rc::new(Cell::new((SessionState::Idle, 0u32)));
+    // Trwająca korekta albo redakcja: przyciski i podtytuł muszą o niej
+    // wiedzieć niezależnie od siebie, a sygnał zmiany bufora chodzi też
+    // w jej trakcie. Obie czynności dzielą tę jedną flagę — wykluczają się.
+    let busy = Rc::new(Cell::new(false));
+    // Rozgałęzienie wypowiedzi: notatka albo pole polecenia redakcji.
+    let sink = redact::Sink::new();
+
+    // Podtytuł trzymany osobno: składa się ze stanu sesji, uzbrojenia
+    // zastąpienia i trwającej korekty, a te trzy rzeczy zmieniają się
+    // niezależnie od siebie.
+    let subtitle = Rc::new(Subtitle::new(window_title.clone()));
+    subtitle.say("Łączę z daemonem…");
 
     // Uzbrojone zaznaczenie widać dwiema drogami: innym kolorem samego
     // zaznaczenia i słowem „zastępuję…" w podtytule (docs/07). Kolory biorą
@@ -745,27 +861,33 @@ fn build_ui(app: &Application) {
         );
     }
     let text_view_for_armed = text_view.clone();
-    let window_title_for_armed = window_title.clone();
-    let status_for_armed = Rc::clone(&status);
+    let subtitle_for_armed = Rc::clone(&subtitle);
     document.connect_armed(move |armed| {
         if armed {
             text_view_for_armed.add_css_class(REPLACE_ARMED_CLASS);
         } else {
             text_view_for_armed.remove_css_class(REPLACE_ARMED_CLASS);
         }
-        let (state, backlog) = status_for_armed.get();
-        window_title_for_armed.set_subtitle(&subtitle_with_replace(state, backlog, armed));
+        subtitle_for_armed.set_armed(armed);
     });
 
     let buffer = text_view.buffer();
     let stack_for_buffer = stack.clone();
+    let clear_button_for_buffer = clear_button.clone();
+    let correct_button_for_buffer = correct_button.clone();
+    let busy_for_buffer = Rc::clone(&busy);
+    let redact_button_for_buffer = redact_button.clone();
     buffer.connect_changed(move |buffer| {
-        let page = if buffer.char_count() == 0 {
-            PAGE_EMPTY
-        } else {
-            PAGE_TEXT
-        };
+        let empty = buffer.char_count() == 0;
+        let page = if empty { PAGE_EMPTY } else { PAGE_TEXT };
         stack_for_buffer.set_visible_child_name(page);
+        clear_button_for_buffer.set_sensitive(!empty);
+        // W trakcie korekty przycisk zostaje nieczynny — odpowiedź modelu
+        // dotyczy tekstu sprzed niej i drugie żądanie tylko by je pomieszało.
+        correct_button_for_buffer.set_sensitive(!empty && !busy_for_buffer.get());
+        // Redakcja rządzi się tym samym: w trakcie dyktowania jest czynna,
+        // bo wypowiedzi sprzed otwarcia okna polecenia odsiewa znacznik.
+        redact_button_for_buffer.set_sensitive(!empty && !busy_for_buffer.get());
     });
 
     // Bramka pilnuje, żeby żądanie nagrywania z pustego biurka nie przepadło
@@ -790,7 +912,7 @@ fn build_ui(app: &Application) {
     // nie ma, żądanie czeka w bramce i ruszy tą samą drogą po połączeniu.
     let toggle_action = gtk4::gio::SimpleAction::new(ACTION_TOGGLE, None);
     let record_button_for_action = record_button.clone();
-    let window_title_for_action = window_title.clone();
+    let subtitle_for_action = Rc::clone(&subtitle);
     let backlog_spinner_for_action = backlog_spinner.clone();
     let gate_for_action = Rc::clone(&gate);
     let accept_for_toggle = Rc::clone(&accept);
@@ -802,7 +924,7 @@ fn build_ui(app: &Application) {
             record_button_for_action.set_active(!record_button_for_action.is_active());
         } else {
             show_connecting(
-                &window_title_for_action,
+                &subtitle_for_action,
                 &backlog_spinner_for_action,
                 &gate_for_action,
             );
@@ -864,17 +986,29 @@ fn build_ui(app: &Application) {
     // już otwarte i odpowiada; przycisk nagrywania budzi się dopiero
     // z połączeniem.
     record_button.set_sensitive(false);
+    let correction_config = std::sync::Arc::new(config.correction.clone());
+    let redaction = Rc::new(redact::Redaction {
+        window: window.clone(),
+        toasts: toast_overlay.clone(),
+        document: Rc::clone(&document),
+        subtitle: Rc::clone(&subtitle),
+        busy: Rc::clone(&busy),
+        sink: Rc::clone(&sink),
+        record_button: record_button.clone(),
+        button: redact_button.clone(),
+        config: std::sync::Arc::clone(&correction_config),
+    });
     let ui = Ui {
-        window_title: window_title.clone(),
+        subtitle: Rc::clone(&subtitle),
         backlog_spinner: backlog_spinner.clone(),
         level_bar: level_bar.clone(),
         record_button: record_button.clone(),
         document: Rc::clone(&document),
-        status: Rc::clone(&status),
         tray: tray_handle,
         show_level_meter: config.window.show_level_meter,
         gate,
         accept: Rc::clone(&accept),
+        sink: Rc::clone(&sink),
     };
     spawn_connect(ui, config.daemon.clone());
 
@@ -885,16 +1019,46 @@ fn build_ui(app: &Application) {
         toast_overlay_for_copy.add_toast(Toast::new("Skopiowano"));
     });
 
+    wire_correction(
+        &correct_button,
+        &window,
+        &toast_overlay,
+        &document,
+        &subtitle,
+        &busy,
+        std::sync::Arc::clone(&correction_config),
+    );
+    redaction.wire();
+
+    let document_for_clear = Rc::clone(&document);
+    let toast_overlay_for_clear = toast_overlay.clone();
+    clear_button.connect_clicked(move |_| {
+        if document_for_clear.clear() {
+            toast_overlay_for_clear.add_toast(Toast::new("Wyczyszczono"));
+        }
+    });
+
     // Cofanie i ponawianie obejmuje dyktowanie i pisanie razem — obie drogi
     // zapisują się w tym samym logu operacji.
     let shortcuts = gtk4::EventControllerKey::new();
     let document_for_keys = Rc::clone(&document);
+    let redact_button_for_keys = redact_button.clone();
     shortcuts.connect_key_pressed(move |_, key, _, state| {
         let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
         let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
         match key {
             gtk4::gdk::Key::z if ctrl && !shift => {
                 document_for_keys.undo();
+                gtk4::glib::Propagation::Stop
+            }
+            // Redakcja poleceniem głosowym. Skrót jest lokalny — dotyczy
+            // tekstu w tym oknie, więc nie ma po co zabierać kombinacji
+            // reszcie systemu. `Ctrl+R` jest zajęte przez ponowne
+            // podyktowanie zaznaczenia (`docs/06`), stąd `Ctrl+E`.
+            gtk4::gdk::Key::E | gtk4::gdk::Key::e if ctrl && !shift => {
+                if redact_button_for_keys.is_sensitive() {
+                    redact_button_for_keys.emit_clicked();
+                }
                 gtk4::glib::Propagation::Stop
             }
             gtk4::gdk::Key::Z | gtk4::gdk::Key::z if ctrl && shift => {
@@ -914,6 +1078,137 @@ fn build_ui(app: &Application) {
     window.add_controller(shortcuts);
 
     window.present();
+}
+
+/// Podpina przycisk korekty tekstu.
+///
+/// Żądanie idzie do modelu **osobnym wątkiem**: odpowiedź to sekundy, a
+/// pętla GTK nie może na nią czekać. Na czas korekty przycisk jest nieczynny,
+/// a podtytuł mówi „Poprawiam tekst…” — nie ma tu drugiego wskaźnika
+/// postępu, bo stan okna mieszka w podtytule (`docs/06`).
+///
+/// Wynik nie wchodzi do dokumentu wprost: najpierw przechodzi przez
+/// [`correct::review`], a przy nadmiarze zmian — przez pytanie do
+/// użytkownika. Zasada z `docs/11`: narzędzie zjadające prawdziwy tekst jest
+/// gorsze od przepuszczonego błędu.
+fn wire_correction(
+    button: &gtk4::Button,
+    window: &ApplicationWindow,
+    toasts: &ToastOverlay,
+    document: &Rc<DocumentView>,
+    subtitle: &Rc<Subtitle>,
+    busy: &Rc<Cell<bool>>,
+    config: std::sync::Arc<diktate_config::CorrectionConfig>,
+) {
+    let window = window.clone();
+    let toasts = toasts.clone();
+    let document = Rc::clone(document);
+    let subtitle = Rc::clone(subtitle);
+    let busy = Rc::clone(busy);
+
+    button.connect_clicked(move |button| {
+        let before = document.text();
+        if before.trim().is_empty() || busy.get() {
+            return;
+        }
+
+        busy.set(true);
+        button.set_sensitive(false);
+        subtitle.set_busy(Some(BUSY_CORRECTING));
+
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<String>>(1);
+        let config_for_thread = std::sync::Arc::clone(&config);
+        let text_for_thread = before.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(correct::ask(&config_for_thread, &text_for_thread));
+        });
+
+        let window = window.clone();
+        let toasts = toasts.clone();
+        let document = Rc::clone(&document);
+        let subtitle = Rc::clone(&subtitle);
+        let busy = Rc::clone(&busy);
+        let button = button.clone();
+        let config = std::sync::Arc::clone(&config);
+        gtk4::glib::spawn_future_local(async move {
+            let result = rx.recv().await;
+            busy.set(false);
+            subtitle.set_busy(None);
+            button.set_sensitive(!document.text().is_empty());
+
+            match result {
+                Ok(Ok(after)) => {
+                    handle_correction(&window, &toasts, &document, &config, &before, &after)
+                }
+                Ok(Err(err)) => toasts.add_toast(Toast::new(&format!("Korekta: {err:#}"))),
+                // Wątek zniknął bez odpowiedzi — nie ma czego pokazywać poza
+                // tym, że nic z tego nie wyszło.
+                Err(_) => toasts.add_toast(Toast::new("Korekta przerwana")),
+            }
+        });
+    });
+}
+
+/// Rozstrzyga, co zrobić z odpowiedzią modelu.
+fn handle_correction(
+    window: &ApplicationWindow,
+    toasts: &ToastOverlay,
+    document: &Rc<DocumentView>,
+    config: &diktate_config::CorrectionConfig,
+    before: &str,
+    after: &str,
+) {
+    // Notatka mogła w międzyczasie urosnąć o wypowiedź, która dopiero teraz
+    // wyszła z transkrypcji. Podmiana całości zjadłaby ją bez śladu, a to
+    // dokładnie ten rodzaj straty, przed którym korekta ma się bronić.
+    if document.text() != before {
+        toasts.add_toast(Toast::new(
+            "Tekst zmienił się w trakcie korekty — nic nie podmieniam",
+        ));
+        return;
+    }
+
+    match correct::review(config, before, after) {
+        correct::Verdict::Accept { ratio } => commit_correction(toasts, document, after, ratio),
+        correct::Verdict::Reject { reason } => {
+            toasts.add_toast(Toast::new(&format!("Korekta odrzucona: {reason}")))
+        }
+        correct::Verdict::Confirm { ratio, limit } => {
+            let dialog = libadwaita::AlertDialog::new(
+                Some("Korekta zmieniła więcej, niż wypada"),
+                Some(&format!(
+                    "Model zmienił {}% słów, a próg dla tej notatki to {}%. Przy takiej \
+                     skali zmian przestaje poprawiać błędy rozpoznania, a zaczyna \
+                     redagować wypowiedź własnymi słowami.",
+                    correct::percent(ratio),
+                    correct::percent(limit),
+                )),
+            );
+            dialog.add_responses(&[("cancel", "Odrzuć"), ("apply", "Zastosuj mimo to")]);
+            dialog.set_response_appearance("apply", libadwaita::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+
+            let toasts = toasts.clone();
+            let document = Rc::clone(document);
+            let after = after.to_string();
+            dialog.choose(window, gtk4::gio::Cancellable::NONE, move |response| {
+                if response == "apply" {
+                    commit_correction(&toasts, &document, &after, ratio);
+                }
+            });
+        }
+    }
+}
+
+/// Wpisuje poprawiony tekst do dokumentu. Jedna operacja logu, więc `Ctrl+Z`
+/// cofa korektę w całości — i o tym właśnie mówi powiadomienie.
+fn commit_correction(toasts: &ToastOverlay, document: &Rc<DocumentView>, text: &str, ratio: f32) {
+    document.replace_all(text);
+    toasts.add_toast(Toast::new(&format!(
+        "Poprawiono — zmienionych słów: {}%. Ctrl+Z cofa.",
+        correct::percent(ratio)
+    )));
 }
 
 #[cfg(test)]
@@ -1113,7 +1408,7 @@ mod tests {
     #[test]
     fn uzbrojone_zastapienie_widac_w_podtytule() {
         assert_eq!(
-            subtitle_with_replace(SessionState::Recording, 0, true),
+            compose_subtitle(SessionState::Recording, 0, true, None),
             "Zastępuję… · Nagrywam"
         );
     }
@@ -1121,8 +1416,32 @@ mod tests {
     #[test]
     fn bez_uzbrojenia_podtytul_zostaje_taki_jak_byl() {
         assert_eq!(
-            subtitle_with_replace(SessionState::Idle, 0, false),
+            compose_subtitle(SessionState::Idle, 0, false, None),
             subtitle_for_state(SessionState::Idle, 0)
+        );
+    }
+
+    #[test]
+    fn trwajaca_korekta_nie_zamazuje_reszty_podtytulu() {
+        // Trzy niezależne rzeczy naraz: korekta idzie na początek, ale
+        // ani zastąpienie, ani stan sesji nie znikają.
+        assert_eq!(
+            compose_subtitle(SessionState::Recording, 2, true, Some(BUSY_CORRECTING)),
+            "Poprawiam tekst… · Zastępuję… · Nagrywam · przetwarzam 2 wypowiedzi"
+        );
+        assert_eq!(
+            compose_subtitle(SessionState::Idle, 0, false, Some(BUSY_CORRECTING)),
+            "Poprawiam tekst… · Gotowe"
+        );
+    }
+
+    #[test]
+    fn trwajaca_redakcja_mowi_o_sobie_a_nie_o_korekcie() {
+        // Korekta i redakcja zajmują to samo miejsce w podtytule, ale są
+        // różnymi czynnościami — użytkownik ma widzieć tę, która trwa.
+        assert_eq!(
+            compose_subtitle(SessionState::Idle, 0, false, Some(BUSY_REDACTING)),
+            "Redaguję tekst… · Gotowe"
         );
     }
 

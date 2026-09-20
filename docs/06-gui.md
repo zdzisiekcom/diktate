@@ -58,6 +58,60 @@ zaznaczenie. Pełna semantyka: [07](07-zachowanie-dyktowania.md#zaznaczenie-i-za
 **Pasek stanu** pokazuje model, język, backend i — gdy `backlog` przekroczy
 `warn_backlog_at` — licznik zaległości.
 
+### Przycisk korekty tekstu
+
+Ikona `tools-check-spelling-symbolic` w pasku nagłówka wysyła **całą** notatkę
+do lokalnego modelu językowego i wstawia poprawioną wersję. Nieczynna przy
+pustej notatce i w trakcie trwającej korekty, niewidoczna przy
+`correction.enabled = false` — guzik, który zawsze kończy się błędem sieci,
+jest gorszy niż jego brak.
+
+Stan idzie do podtytułu („Poprawiam tekst…"), tak jak każdy inny stan okna;
+wynik — do `Toast`-a z odsetkiem zmienionych słów. Korekta wchodzi jako
+**jedna operacja** modelu dokumentu, więc `Ctrl+Z` cofa ją w całości.
+
+Zabezpieczenia i wszystkie pokrętła opisuje
+[11-korekta-llm.md](11-korekta-llm.md#wdrożenie); najważniejsze z nich to
+pytanie zadawane wtedy, gdy model zmienił więcej słów, niż przewiduje próg —
+wtedy przestaje poprawiać błędy rozpoznania, a zaczyna redagować wypowiedź
+własnymi słowami.
+
+### Przycisk redakcji poleceniem głosowym
+
+Ikona `document-edit-symbolic` obok korekty (skrót `Ctrl+E`) otwiera okno
+polecenia: użytkownik **mówi**, co zmienić — „zmień na bardziej formalny",
+„usuń powtórzenia", „przepisz w czasie przyszłym" — a model wykonuje to na
+zaznaczonym fragmencie albo, gdy nic nie jest zaznaczone, na całej notatce.
+
+Okno polecenia trzyma się konwencji widoków: `adw::Window` z `ToolbarView`
+i `HeaderBar`, tytuł „Polecenie" ze stanem w podtytule, pole jako `EntryRow`
+w `PreferencesGroup`, której nagłówek mówi o celu („Zaznaczony fragment"
+albo „Cała notatka"), a opis pokazuje jego początek. „Anuluj" po lewej,
+„Wykonaj" (`suggested-action`) po prawej, `Escape` zamyka.
+
+Wypowiedzi z transkrypcji trafiają przez ten czas **do pola polecenia, nie do
+notatki** — to jedyne rozgałęzienie tekstu w oknie i mieszka po stronie
+klienta; daemon nie wie o redakcji nic. Pole jest edytowalne: przekręcone
+polecenie poprawia się szybciej palcem niż drugim podejściem.
+
+Rozstrzyga o tym **oś czasu audio**, nie moment odebrania wiadomości: do
+polecenia idą wyłącznie wypowiedzi, które padły po otwarciu okna. Zdanie
+powiedziane wcześniej, a wychodzące z transkrypcji dopiero teraz, jest
+treścią notatki — to ta sama reguła, co przy zastępowaniu zaznaczenia
+([07-zachowanie-dyktowania.md](07-zachowanie-dyktowania.md)).
+
+Dzięki temu redakcja działa **także w trakcie dyktowania**: przycisk jest
+nieczynny tylko przy pustej notatce oraz w trakcie trwającej korekty albo
+redakcji. Ukrywa go to samo `correction.enabled = false`, co przycisk
+korekty. Okno polecenia włącza mikrofon, jeśli nie był włączony — i gasi go
+przy zamknięciu tylko wtedy, gdy samo go włączyło; trwającego dyktowania nie
+przerywa.
+
+Reszta jest jak przy korekcie: stan w podtytule („Redaguję tekst…"), wynik
+jako `Toast` z odsetkiem zmienionych słów, podmiana jako **jedna operacja**
+modelu dokumentu, więc `Ctrl+Z` cofa ją w całości. Szczegóły i zabezpieczenia:
+[11-korekta-llm.md](11-korekta-llm.md#redakcja-poleceniem-głosowym).
+
 ### Skróty w oknie
 
 | Skrót | Akcja |
@@ -65,6 +119,7 @@ zaznaczenie. Pełna semantyka: [07](07-zachowanie-dyktowania.md#zaznaczenie-i-za
 | `Ctrl+C` | Kopiuj całość do schowka |
 | `Super+C` | Kopiuj i zamknij (przycisk „OK”) |
 | `Ctrl+R` | Podyktuj ponownie zaznaczony fragment (jawne uzbrojenie; przy `implicit_replace` wystarczy zaznaczenie) |
+| `Ctrl+E` | Zredaguj poleceniem głosowym (zaznaczenie albo całą notatkę) |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Cofnij / ponów |
 | `Ctrl+S` | Zapisz do historii |
 | `Ctrl+Space` | Pauza / wznowienie nagrywania |

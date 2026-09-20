@@ -64,6 +64,21 @@ pub struct DocumentView {
 /// Powiadomienie okna o zmianie uzbrojenia zastąpienia.
 type ArmedNotify = Box<dyn Fn(bool)>;
 
+/// Zakres, na którym ma zadziałać redakcja poleceniem głosowym.
+///
+/// `whole` nie da się wyliczyć z samych kotwic po fakcie — zaznaczenie
+/// obejmujące całą notatkę to co innego niż jej brak, choć zakres wychodzi
+/// ten sam. Okno mówi o tym użytkownikowi, więc różnica musi przetrwać.
+pub struct Target {
+    from: Anchor,
+    to: Anchor,
+    /// Tekst celu w chwili naciśnięcia przycisku — to on idzie do modelu
+    /// i on decyduje, czy podmiana jest jeszcze aktualna.
+    pub text: String,
+    /// Czy celem jest cała notatka (brak zaznaczenia).
+    pub whole: bool,
+}
+
 /// Zapamiętane zaznaczenie czekające na wypowiedź, która je zastąpi.
 #[derive(Debug, Clone, Copy)]
 struct Armed {
@@ -190,9 +205,95 @@ impl DocumentView {
         true
     }
 
+    /// Czyści całą notatkę. Idzie tą samą drogą co kasowanie z klawiatury,
+    /// więc operacja trafia do logu i `Ctrl+Z` przywraca tekst. `false`, gdy
+    /// nie było czego czyścić.
+    pub fn clear(&self) -> bool {
+        let (mut start, mut end) = self.buffer.bounds();
+        if start == end {
+            return false;
+        }
+        self.buffer.delete(&mut start, &mut end);
+        true
+    }
+
     /// Cały tekst notatki — do schowka.
     pub fn text(&self) -> String {
         self.document.borrow().text()
+    }
+
+    /// Podmienia **całą** notatkę jedną operacją logu — tą drogą wchodzi
+    /// korekta LLM-em (`docs/11-korekta-llm.md`). Jedna operacja, a nie
+    /// kasowanie plus wstawienie, bo `Ctrl+Z` ma cofać korektę w całości,
+    /// jednym naciśnięciem, a nie zostawiać po drodze pustej notatki.
+    pub fn replace_all(&self, text: &str) {
+        let to = self.document.borrow().end_anchor();
+        self.document.borrow_mut().set_text(Anchor::Start, to, text);
+        self.rebuild();
+        // Karetka na końcu: dyktowanie po korekcie płynie dalej stamtąd,
+        // gdzie tekst się kończy. `rebuild` ustawił tam już kotwicę.
+        self.place_caret(self.insert_anchor.get());
+    }
+
+    /// Cel redakcji poleceniem głosowym: zaznaczenie, a gdy go nie ma — cała
+    /// notatka (`docs/11#redakcja-poleceniem-głosowym`).
+    ///
+    /// Zakres zapamiętujemy **kotwicami**, nie offsetami w buforze: między
+    /// naciśnięciem przycisku a odpowiedzią modelu mija kilka sekund, w czasie
+    /// których do notatki może dopłynąć zaległa wypowiedź i przesunąć każdy
+    /// offset. Kotwica to przeżyje, liczba nie.
+    pub fn target(&self) -> Target {
+        let document = self.document.borrow();
+        let zaznaczenie = self.buffer.selection_bounds().and_then(|(start, end)| {
+            let from = document.anchor_at_char(start.offset() as usize)?;
+            let to = document.anchor_at_char(end.offset() as usize)?;
+            Some((from, to))
+        });
+        match zaznaczenie {
+            Some((from, to)) => Target {
+                from,
+                to,
+                text: document.text_between(from, to),
+                whole: false,
+            },
+            None => Target {
+                from: Anchor::Start,
+                to: document.end_anchor(),
+                text: document.text(),
+                whole: true,
+            },
+        }
+    }
+
+    /// Podmienia zakres celu jedną operacją logu — tą drogą wchodzi redakcja
+    /// poleceniem. Zwraca `false`, gdy tekst celu zmienił się w międzyczasie:
+    /// odpowiedź modelu dotyczy wtedy czegoś innego, niż stoi w notatce,
+    /// a podmiana zjadłaby wypowiedź, która dopłynęła z transkrypcji.
+    pub fn replace_range(&self, target: &Target, text: &str) -> bool {
+        if self.document.borrow().text_between(target.from, target.to) != target.text {
+            return false;
+        }
+        self.document
+            .borrow_mut()
+            .set_text(target.from, target.to, text);
+        self.rebuild();
+        self.place_caret(self.insert_anchor.get());
+        true
+    }
+
+    /// Znacznik „od teraz": chwila, od której wypowiedzi są poleceniem
+    /// redakcyjnym, a nie treścią notatki.
+    pub fn mark(&self) -> Mark {
+        Mark {
+            epoch: self.session_epoch.get(),
+            at_ms: self.audio_now_ms(),
+        }
+    }
+
+    /// Czy ta wypowiedź padła po znaczniku. Zaległość sprzed niego należy do
+    /// notatki — okno polecenia nie ma prawa jej zjeść.
+    pub fn spoken_after(&self, mark: Mark, audio_start_ms: u64) -> bool {
+        spoken_after(mark, self.session_epoch.get(), audio_start_ms)
     }
 
     // --- wnętrze ---
@@ -425,6 +526,36 @@ impl DocumentView {
     }
 }
 
+/// Chwila na osi czasu dyktowania, zapamiętana po to, żeby rozstrzygnąć,
+/// które wypowiedzi padły **po** niej.
+///
+/// Sesja audio liczy czas od zera przy każdym nagraniu, więc sama liczba
+/// milisekund nic nie znaczy bez numeru sesji — stąd oba pola razem.
+#[derive(Debug, Clone, Copy)]
+pub struct Mark {
+    epoch: u64,
+    at_ms: u64,
+}
+
+impl Mark {
+    /// Znacznik złożony z gotowych liczb — wyłącznie do testów
+    /// rozgałęziania wypowiedzi w [`crate::redact`], które nie mają jak
+    /// uruchomić sesji audio.
+    #[cfg(test)]
+    pub fn at(epoch: u64, at_ms: u64) -> Self {
+        Self { epoch, at_ms }
+    }
+}
+
+/// Czy wypowiedź zaczynająca się w `audio_start_ms` padła po znaczniku.
+///
+/// Ta sama reguła, co przy zastępowaniu zaznaczenia (`docs/07`), użyta do
+/// czego innego: rozstrzyga, czy wypowiedź jest poleceniem redakcyjnym, czy
+/// zaległą treścią notatki, która wyszła z transkrypcji dopiero teraz.
+fn spoken_after(mark: Mark, session_epoch: u64, audio_start_ms: u64) -> bool {
+    replaces(mark.epoch, mark.at_ms, session_epoch, audio_start_ms)
+}
+
 /// Czy wypowiedź zaczynająca się w `audio_start_ms` zastępuje zaznaczenie
 /// uzbrojone w `armed_at_ms` — reguła rozstrzygania z `docs/07`.
 ///
@@ -461,6 +592,25 @@ mod tests {
         // Granica należy do zastępowania: mowa zaczęta w tej samej chwili
         // jest już poprawką, a nie zaległością.
         assert!(replaces(1, 5_000, 1, 5_000));
+    }
+
+    #[test]
+    fn wypowiedz_sprzed_otwarcia_okna_polecenia_nie_jest_poleceniem() {
+        // Ta sama reguła co przy zastępowaniu, użyta do czego innego:
+        // zaległość, która padła przed otwarciem okna, jest treścią notatki,
+        // a nie poleceniem redakcyjnym.
+        let znacznik = Mark {
+            epoch: 1,
+            at_ms: 4_000,
+        };
+        assert!(
+            !spoken_after(znacznik, 1, 1_200),
+            "zaległość idzie do notatki"
+        );
+        assert!(
+            spoken_after(znacznik, 1, 4_500),
+            "wypowiedź po otwarciu to polecenie"
+        );
     }
 
     #[test]
@@ -554,5 +704,60 @@ mod tests {
         assert!(document.cancel_replace());
         assert!(!document.is_armed());
         assert_eq!(tekst(&document), "Ala ma kota");
+
+        // Korekta LLM-em podmienia całość, a jedno cofnięcie przywraca tekst
+        // sprzed niej — nie zostawia po drodze pustej notatki (`docs/11`).
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "ala ma kota", 0));
+        document.insert_segment(&segment(1, "i psa", 1_000));
+        let przed = tekst(&document);
+        document.replace_all("Ala ma kota i psa.");
+        assert_eq!(tekst(&document), "Ala ma kota i psa.");
+        assert!(document.undo(), "korekta ma być odwracalna");
+        assert_eq!(tekst(&document), przed, "jedno cofnięcie wystarcza");
+
+        // Redakcja poleceniem: celem jest zaznaczenie, a podmiana wchodzi
+        // jedną operacją logu — tak samo odwracalną jak korekta.
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "Ala ma kota i psa", 0));
+        zaznacz(&document, 7, 11);
+        let cel = document.target();
+        assert_eq!(cel.text, "kota");
+        assert!(!cel.whole, "zaznaczenie nie jest całą notatką");
+        assert!(document.replace_range(&cel, "kotkę"));
+        assert_eq!(tekst(&document), "Ala ma kotkę i psa");
+        assert!(document.undo(), "redakcja ma być odwracalna");
+        assert_eq!(tekst(&document), "Ala ma kota i psa");
+
+        // Bez zaznaczenia celem jest cała notatka.
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "Ala ma kota", 0));
+        let cel = document.target();
+        assert!(cel.whole, "brak zaznaczenia to cała notatka");
+        assert_eq!(cel.text, "Ala ma kota");
+
+        // Cel, który zmienił się w trakcie czekania na model, nie jest
+        // podmieniany — wypowiedź z transkrypcji zostałaby zjedzona bez śladu.
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "Ala ma kota", 0));
+        zaznacz(&document, 7, 11);
+        let cel = document.target();
+        document.insert_segment(&segment(1, "i psa", 5_000));
+        assert!(
+            !document.replace_range(&cel, "kotkę"),
+            "zmieniony cel ma zatrzymać redakcję"
+        );
+
+        // Dyktowanie po korekcie płynie dalej od końca poprawionego tekstu.
+        let document = przygotuj();
+        document.begin_audio_session();
+        document.insert_segment(&segment(0, "ala ma kota", 0));
+        document.replace_all("Ala ma kota.");
+        document.insert_segment(&segment(1, "I psa.", 1_000));
+        assert_eq!(tekst(&document), "Ala ma kota. I psa.");
     }
 }

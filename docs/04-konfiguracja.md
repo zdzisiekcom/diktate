@@ -149,7 +149,50 @@ toggle_recording = "<Control>space"   # wewnątrz okna, nie globalny
 [tray]
 enabled = true
 show_backlog = true
+
+[correction]                   # korekta tekstu LLM-em, patrz docs/11
+enabled = true                 # false ukrywa przycisk w oknie
+endpoint = "http://home-host.tarpan-flops.ts.net:8080/v1/chat/completions"
+model = "bielik-11b-v3"        # sprawdź /v1/models — serwer bywa przestawiany
+api_key = ""                   # puste = bez nagłówka Authorization
+temperature = 0.0              # i tak nie gwarantuje powtarzalności
+max_tokens = 2000
+timeout_ms = 120000
+disable_thinking = true        # bez tego model z thinkingiem jest 5–45× wolniejszy
+short_text_words = 40          # do tylu słów notatka jest „krótka"
+max_change_ratio_short = 0.5   # próg zmian dla krótkiej notatki
+max_change_ratio_long = 0.35   # próg dla dłuższej — tu leży ryzyko redakcji
+min_changed_words = 2          # tyle zmian przechodzi zawsze, bez pytania
+allowed_extra_chars = ""       # znaki ponad alfabet polski i interpunkcję
+system_prompt = '''…'''        # instrukcja korektora; domyślna w docs/11
+user_template = "Popraw:\n\n{text}"   # {text} zastępuje treść notatki
+redaction_system_prompt = '''…'''     # instrukcja redaktora; domyślna w docs/11
+redaction_user_template = "Polecenie: {instruction}\n\nTekst:\n\n{text}"
 ```
+
+**Prompt jest polem konfiguracji, nie stałą w kodzie.** To on decyduje o całym
+zachowaniu korekty: ten sam model z promptem ostrożnym nie naprawia nawet
+oczywistych błędów, a z promptem pokazującym przykłady napraw działa
+([11-korekta-llm.md](11-korekta-llm.md#prompt-decyduje-o-wszystkim)).
+Dobieranie promptu jest więc strojeniem, a nie zmianą programu. Kreator
+zapisuje go jako literał wielolinijkowy `'''…'''`, żeby dał się czytać
+i poprawiać ręcznie.
+
+Sekcja obsługuje **dwie** czynności: korektę transkrypcji i redakcję
+poleceniem głosowym ([11-korekta-llm.md](11-korekta-llm.md#redakcja-poleceniem-głosowym)).
+Dzielą serwer, model i limity, różnią się promptem — `system_prompt` zakazuje
+zmiany stylu, `redaction_system_prompt` przeciwnie, każe wykonać polecenie
+użytkownika. `enabled = false` ukrywa oba przyciski naraz. Progi
+`max_change_ratio_*` dotyczą **wyłącznie korekty**: polecenie „zmień na
+bardziej formalny" ma zmienić dużo i alarm przy 41% byłby tu szumem.
+
+Szablon `redaction_user_template` musi zawierać oba pola — `{instruction}`
+i `{text}` — inaczej start okna kończy się błędem walidacji: model bez
+jednego z nich nie wie, co zrobić albo z czym.
+
+Progi `max_change_ratio_*` sprawdzane są **razem z** `min_changed_words`:
+przekroczenie samego odsetka przy jednej czy dwóch naprawionych pomyłkach
+nie jest redakcją, tylko dobrze wykonaną korektą krótkiego zdania.
 
 Pola `[replace]`, `[history]`, `implicit_replace`, `snap_to_word_boundary`,
 `auto_case` i `show_confidence` dochodzą razem z etapem 2 — walidacja

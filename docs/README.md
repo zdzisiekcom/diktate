@@ -21,6 +21,7 @@ Status: **faza projektowa**. Nie ma jeszcze kodu.
 | [08-dystrybucja-i-testy.md](08-dystrybucja-i-testy.md) | Budowanie, pakowanie, strategia testów |
 | [09-roadmapa.md](09-roadmapa.md) | Kolejność prac, etapy, co świadomie odłożone |
 | [10-wake-word.md](10-wake-word.md) | Aktywacja głosem — przegląd silników, wybrane rozwiązanie |
+| [11-korekta-llm.md](11-korekta-llm.md) | Korekta i redakcja tekstu lokalnym LLM-em — pomiary, zabezpieczenia, wdrożenie |
 
 ## Decyzje, które już zapadły
 
@@ -53,6 +54,8 @@ założenia wyjściowe całej reszty dokumentacji.
 ## Poza zakresem pierwszej wersji
 
 - Wpisywanie tekstu do aktywnego okna przez `ydotool`
-- Redakcja tekstu lokalnym LLM-em
+- Automatyczna redakcja tekstu LLM-em w trakcie dyktowania (na żądanie **jest**:
+  korekta całej notatki i redakcja poleceniem głosowym —
+  [11-korekta-llm.md](11-korekta-llm.md#wdrożenie))
 - Diaryzacja (rozróżnianie mówców)
 - Flatpak
