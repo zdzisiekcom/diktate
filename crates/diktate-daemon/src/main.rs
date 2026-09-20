@@ -13,9 +13,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use diktate_config::{Backend, DaemonConfig};
 use diktate_core::segmenter::SegmenterConfig;
 use diktate_core::{
-    parakeet::default_parakeet_model_path, transcribe::default_model_path, ParakeetTranscriber,
-    Session, SessionConfig, Transcribe,
-    Transcriber,
+    parakeet::default_parakeet_model_path, prompt::PromptSlot, transcribe::default_model_path,
+    ParakeetTranscriber, Session, SessionConfig, Transcribe, Transcriber,
 };
 use diktate_proto::{
     pidfile, socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
@@ -204,6 +203,9 @@ fn session_config(config: &DaemonConfig) -> SessionConfig {
         vad_threshold: config.vad.threshold,
         queue_capacity: config.queue.max_pending_segments,
         level_interval_ms: config.audio.level_interval_ms,
+        // Progi promptu jeszcze nie mają odpowiednika w `daemon.toml` —
+        // zostają przy domyślnych z `SessionConfig` do czasu ich wpięcia.
+        ..SessionConfig::default()
     }
 }
 
@@ -258,9 +260,13 @@ fn serve(stream: UnixStream, transcriber: &Arc<dyn Transcribe>) -> Result<()> {
                         DaemonConfig::default()
                     }
                 };
+                // Slot na razie nikt nie wypełnia — kontekst wejdzie metodą
+                // `session.context` w kolejnym kroku (zadanie 6).
+                let prompt_slot = Arc::new(PromptSlot::new());
                 match Session::start(
                     Arc::clone(transcriber),
                     session_config(&config),
+                    prompt_slot,
                     move |segment| {
                         eprintln!(
                             "diktate-daemon: [{}] {} ({}–{} ms)",

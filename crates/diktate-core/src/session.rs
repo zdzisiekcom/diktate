@@ -138,20 +138,8 @@ impl<G: Fn(u32)> Backlog<G> {
 
     /// Segment przestał być zaległością (obsłużony albo odrzucony przez
     /// filtr) — zaległość maleje o 1.
-    ///
-    /// Odejmowanie jest nasycające (nie schodzi poniżej zera), mimo że w
-    /// prawdziwym potoku `inc`/`dec` są zawsze sparowane przez
-    /// `dispatch_segment` — bezpośrednie wstrzyknięcie segmentu do kanału
-    /// (tak robią testy `run_transcriber` niżej) wywołałoby `dec` bez
-    /// wcześniejszego `inc` i zwykłe odejmowanie od zera by spanikowało.
     fn dec(&self) {
-        let previous = self
-            .count
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                Some(n.saturating_sub(1))
-            })
-            .expect("aktualizacja zawsze zwraca Some, więc nigdy nie odmawia");
-        let new = previous.saturating_sub(1);
+        let new = self.count.fetch_sub(1, Ordering::SeqCst) - 1;
         (self.on_change)(new);
     }
 
@@ -638,13 +626,18 @@ mod tests {
         ile: usize,
     ) -> Vec<String> {
         let (tx, rx) = sync_channel(ile);
+        let backlog = Backlog::new(|_| {});
         for seq in 0..ile {
+            // Naśladujemy `dispatch_segment`: w prawdziwym potoku `inc()`
+            // zawsze poprzedza wysłanie do kanału, więc `dec()` w
+            // `run_transcriber` ma się do czego odnieść — bez tego licznik
+            // schodziłby poniżej zera i celowo panikowałby.
+            backlog.inc();
             tx.send((seq as u64, segment(0.1), Instant::now())).unwrap();
         }
         drop(tx);
         let wyniki = Arc::new(Mutex::new(Vec::new()));
         let zebrane = Arc::clone(&wyniki);
-        let backlog = Backlog::new(|_| {});
         run_transcriber(
             rx,
             atrapa,
