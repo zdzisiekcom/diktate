@@ -195,7 +195,8 @@ klienta idzie wynik tego drugiego przebiegu. Domyślnie kontekst włączony.
 
 `initial_prompt` z konfiguracji — słownictwo branżowe, nazwy własne,
 preferowana interpunkcja. Definiowalny per profil językowy. To główna dźwignia
-jakości transkrypcji polskiej.
+jakości transkrypcji polskiej tam, gdzie nikt szablonu z `[whisper] prompt`
+nie przysyła (wyżej) — w kliencie GTK tę rolę przejmuje ten szablon.
 
 ### Filtr halucynacji
 

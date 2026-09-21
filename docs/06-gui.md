@@ -128,9 +128,10 @@ modelu dokumentu, więc `Ctrl+Z` cofa ją w całości. Szczegóły i zabezpiecze
 | `Ctrl+,` | Otwórz okno ustawień |
 | `Escape` | Anuluj tryb zastępowania; ponownie — odrzuć i zamknij |
 
-`gtk.toml`, sekcja `[shortcuts]`, definiuje kombinacje dla `copy`, `undo`,
-`redo` i `toggle_recording` — reszta powyższych skrótów, `Ctrl+,` włącznie,
-jest dziś zaszyta na stałe w kodzie klienta.
+Sekcja `[shortcuts]` w `gtk.toml` istnieje w schemacie konfiguracji i jest
+zapisywana przez pisarza, ale **nic jej dziś nie czyta** — wszystkie
+przypisania klawiszy powyżej, z `copy`, `undo`, `redo` i `toggle_recording`
+włącznie, są literałami w kodzie klienta.
 
 ### „OK” — jedno domknięcie dyktowania
 
