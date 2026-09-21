@@ -13,12 +13,6 @@
 //! ([`Fields`], [`fields_from`], [`apply`]) to czyste funkcje testowane bez
 //! GTK-a, a budowanie widżetów ([`present`] i pomocnicze funkcje niżej)
 //! dotyka wyłącznie ich wyników.
-//!
-//! Nic jeszcze nie woła [`present`] — przycisk w pasku nagłówka i skrót
-//! `Ctrl+,` dochodzą w kolejnym zadaniu. Stąd atrybut niżej zamiast ośmiu
-//! kopii `#[allow(dead_code)]` przy każdej funkcji modułu; znika, gdy
-//! `main.rs` zacznie wywoływać `settings::present`.
-#![allow(dead_code)]
 
 use diktate_config::{DaemonConfig, GtkConfig};
 use gtk4::prelude::*;
@@ -26,7 +20,7 @@ use gtk4::{gio, Frame, TextView, WrapMode};
 use libadwaita::prelude::*;
 use libadwaita::{
     ActionRow, ApplicationWindow, EntryRow, PreferencesDialog, PreferencesGroup, PreferencesPage,
-    SpinRow, SwitchRow,
+    SpinRow, SwitchRow, Toast,
 };
 
 /// Pola pokazywane w oknie ustawień — jedyne, które `apply` wolno mu dotknąć.
@@ -35,6 +29,12 @@ use libadwaita::{
 /// `timeout_ms`, szablony wiadomości użytkownika) to strojenie, nie
 /// ustawienia — okno ma go nie ruszać, żeby jego otwarcie nigdy nie
 /// skasowało klucza API.
+///
+/// Nic jeszcze nie woła [`present`], które je tworzy — przycisk w pasku
+/// nagłówka i skrót `Ctrl+,` dochodzą w zadaniu 11. Stąd `#[allow(dead_code)]`
+/// tutaj i przy pozostałych elementach modułu, których nic jeszcze nie woła;
+/// znika po jednym, gdy `main.rs` zacznie wywoływać `settings::present`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fields {
     pub prompt: String,
@@ -50,6 +50,7 @@ pub struct Fields {
 }
 
 /// Czyta pola okna z aktualnej konfiguracji.
+#[allow(dead_code)]
 pub fn fields_from(config: &GtkConfig) -> Fields {
     Fields {
         prompt: config.whisper.prompt.clone(),
@@ -67,6 +68,7 @@ pub fn fields_from(config: &GtkConfig) -> Fields {
 
 /// Zapisuje pola okna z powrotem do konfiguracji. Dotyka **wyłącznie** pól
 /// z [`Fields`] — nic ponadto.
+#[allow(dead_code)]
 pub fn apply(config: &mut GtkConfig, fields: &Fields) {
     config.whisper.prompt = fields.prompt.clone();
     config.whisper.context_chars = fields.context_chars;
@@ -85,6 +87,7 @@ pub fn apply(config: &mut GtkConfig, fields: &Fields) {
 /// Wielolinijkowe pole tekstowe w karcie — `EntryRow` jest jednolinijkowy,
 /// a szablon promptu i instrukcje korekty muszą być czytelne na kilku
 /// wierszach naraz.
+#[allow(dead_code)]
 fn text_card(initial: &str) -> (Frame, TextView) {
     let text_view = TextView::builder()
         .wrap_mode(WrapMode::WordChar)
@@ -104,27 +107,8 @@ fn text_card(initial: &str) -> (Frame, TextView) {
     (frame, text_view)
 }
 
-/// To samo co [`text_card`], z etykietą nad kartą — dla grup, w których
-/// więcej niż jedno pole tekstowe potrzebuje własnego opisu.
-fn labeled_text_card(label: &str, initial: &str) -> (gtk4::Box, TextView) {
-    let heading = gtk4::Label::builder()
-        .label(label)
-        .halign(gtk4::Align::Start)
-        .build();
-    heading.add_css_class("heading");
-
-    let (frame, text_view) = text_card(initial);
-
-    let container = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(6)
-        .build();
-    container.append(&heading);
-    container.append(&frame);
-    (container, text_view)
-}
-
 /// Odczytuje bieżącą treść pola wielolinijkowego.
+#[allow(dead_code)]
 fn text_view_value(view: &TextView) -> String {
     let buffer = view.buffer();
     buffer
@@ -136,6 +120,7 @@ fn text_view_value(view: &TextView) -> String {
 /// Nieudane otwarcie (np. brak zarejestrowanego programu dla `.toml`) trafia
 /// do logu — to nie jest akcja, dla której otwarte okno ustawień ma się
 /// czymkolwiek tłumaczyć.
+#[allow(dead_code)]
 fn open_file_row(title: &str, path: std::path::PathBuf) -> ActionRow {
     let row = ActionRow::builder()
         .title(title)
@@ -151,11 +136,17 @@ fn open_file_row(title: &str, path: std::path::PathBuf) -> ActionRow {
     row
 }
 
-/// Otwiera okno ustawień. Zapis następuje przy zamknięciu (`connect_closed`):
-/// pola widżetów schodzą do [`Fields`], [`apply`] nakłada je na kopię
-/// przekazanej konfiguracji, a `config.save()` zapisuje ją na dysk. Dopiero
-/// udany zapis woła `on_saved` — nieudany zostaje w logu, a okno wywołujące
-/// nie dostaje nowej konfiguracji, więc nie może udawać, że zapis się udał.
+/// Otwiera okno ustawień. Zapis następuje przy próbie zamknięcia
+/// (`connect_close_attempt`, z `can_close` na stałe `false` — to jedyny
+/// sposób, by nieudany zapis naprawdę zatrzymał zamykanie: sygnał `closed`
+/// leci już *po* zniknięciu okna, więc byłoby za późno na cokolwiek
+/// pokazać). Pola widżetów schodzą do [`Fields`], [`apply`] nakłada je na
+/// kopię przekazanej konfiguracji, a `config.save()` zapisuje ją na dysk.
+/// Udany zapis woła `on_saved` i domyka okno (`force_close`) — nieudany
+/// zostaje w logu i w `Toast` samego okna ustawień (nie okna głównego pod
+/// spodem — tam właśnie patrzy użytkownik), a okno zostaje otwarte
+/// z nietkniętą treścią pól.
+#[allow(dead_code)]
 pub fn present(
     parent: &ApplicationWindow,
     config: &GtkConfig,
@@ -220,13 +211,24 @@ pub fn present(
     server_group.add(&model_row);
     correction_page.add(&server_group);
 
-    let instructions_group = PreferencesGroup::builder().title("Instrukcje").build();
-    let (system_box, system_view) = labeled_text_card("Prompt korektora", &fields.system_prompt);
-    instructions_group.add(&system_box);
-    let (redaction_box, redaction_view) =
-        labeled_text_card("Prompt redaktora", &fields.redaction_system_prompt);
-    instructions_group.add(&redaction_box);
-    correction_page.add(&instructions_group);
+    let correction_prompt_group = PreferencesGroup::builder()
+        .title("Prompt korektora")
+        .description("Naprawia błędy rozpoznania mowy. Ma zakaz zmiany stylu wypowiedzi.")
+        .build();
+    let (system_frame, system_view) = text_card(&fields.system_prompt);
+    correction_prompt_group.add(&system_frame);
+    correction_page.add(&correction_prompt_group);
+
+    let redaction_prompt_group = PreferencesGroup::builder()
+        .title("Prompt redaktora")
+        .description(
+            "Wykonuje polecenie podyktowane głosem — także gdy każe zmienić styl \
+             albo skrócić tekst.",
+        )
+        .build();
+    let (redaction_frame, redaction_view) = text_card(&fields.redaction_system_prompt);
+    redaction_prompt_group.add(&redaction_frame);
+    correction_page.add(&redaction_prompt_group);
 
     let thresholds_group = PreferencesGroup::builder().title("Progi").build();
     let short_ratio_row = SpinRow::with_range(0.0, 1.0, 0.05);
@@ -249,7 +251,11 @@ pub fn present(
 
     dialog.add(&correction_page);
 
-    dialog.connect_closed(move |_| {
+    // `can_close = false` na stałe: każda próba zamknięcia (Escape, klawisze
+    // okna, `close()`) trafia w `close-attempt` zamiast zamykać dialog od
+    // razu. Zapis idzie więc zawsze przed zamknięciem, nie po nim.
+    dialog.set_can_close(false);
+    dialog.connect_close_attempt(move |dialog| {
         let fields = Fields {
             prompt: text_view_value(&prompt_view),
             context_chars: context_row.value() as usize,
@@ -265,8 +271,17 @@ pub fn present(
         let mut new_config = base_config.clone();
         apply(&mut new_config, &fields);
         match new_config.save() {
-            Ok(()) => on_saved(new_config),
-            Err(err) => eprintln!("diktate-gtk: nie udało się zapisać ustawień: {err:#}"),
+            Ok(()) => {
+                on_saved(new_config);
+                // Zapis się udał — dopiero teraz wolno naprawdę zamknąć;
+                // `close()` znów trafiłby w `close-attempt`, bo `can_close`
+                // zostaje `false`.
+                dialog.force_close();
+            }
+            Err(err) => {
+                eprintln!("diktate-gtk: nie udało się zapisać ustawień: {err:#}");
+                dialog.add_toast(Toast::new(&format!("Nie udało się zapisać ustawień: {err}")));
+            }
         }
     });
 
