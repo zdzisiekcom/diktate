@@ -50,10 +50,6 @@ impl ContextSender {
     /// Nowe ustawienia z okna ustawień. Kasuje pamięć ostatnio wysłanego
     /// promptu — zmiana szablonu ma dojść do daemona, choćby dokument
     /// się nie ruszył.
-    ///
-    /// Okno ustawień zacznie ją wołać dopiero w kolejnym zadaniu — stąd
-    /// `allow` niżej.
-    #[allow(dead_code)]
     pub fn set_config(&self, config: GtkWhisperConfig) {
         *self.config.borrow_mut() = config;
         self.last.borrow_mut().clear();

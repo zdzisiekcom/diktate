@@ -29,12 +29,6 @@ use libadwaita::{
 /// `timeout_ms`, szablony wiadomości użytkownika) to strojenie, nie
 /// ustawienia — okno ma go nie ruszać, żeby jego otwarcie nigdy nie
 /// skasowało klucza API.
-///
-/// Nic jeszcze nie woła [`present`], które je tworzy — przycisk w pasku
-/// nagłówka i skrót `Ctrl+,` dochodzą w zadaniu 11. Stąd `#[allow(dead_code)]`
-/// tutaj i przy pozostałych elementach modułu, których nic jeszcze nie woła;
-/// znika po jednym, gdy `main.rs` zacznie wywoływać `settings::present`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fields {
     pub prompt: String,
@@ -50,7 +44,6 @@ pub struct Fields {
 }
 
 /// Czyta pola okna z aktualnej konfiguracji.
-#[allow(dead_code)]
 pub fn fields_from(config: &GtkConfig) -> Fields {
     Fields {
         prompt: config.whisper.prompt.clone(),
@@ -68,7 +61,6 @@ pub fn fields_from(config: &GtkConfig) -> Fields {
 
 /// Zapisuje pola okna z powrotem do konfiguracji. Dotyka **wyłącznie** pól
 /// z [`Fields`] — nic ponadto.
-#[allow(dead_code)]
 pub fn apply(config: &mut GtkConfig, fields: &Fields) {
     config.whisper.prompt = fields.prompt.clone();
     config.whisper.context_chars = fields.context_chars;
@@ -87,7 +79,6 @@ pub fn apply(config: &mut GtkConfig, fields: &Fields) {
 /// Wielolinijkowe pole tekstowe w karcie — `EntryRow` jest jednolinijkowy,
 /// a szablon promptu i instrukcje korekty muszą być czytelne na kilku
 /// wierszach naraz.
-#[allow(dead_code)]
 fn text_card(initial: &str) -> (Frame, TextView) {
     let text_view = TextView::builder()
         .wrap_mode(WrapMode::WordChar)
@@ -108,7 +99,6 @@ fn text_card(initial: &str) -> (Frame, TextView) {
 }
 
 /// Odczytuje bieżącą treść pola wielolinijkowego.
-#[allow(dead_code)]
 fn text_view_value(view: &TextView) -> String {
     let buffer = view.buffer();
     buffer
@@ -120,7 +110,6 @@ fn text_view_value(view: &TextView) -> String {
 /// Nieudane otwarcie (np. brak zarejestrowanego programu dla `.toml`) trafia
 /// do logu — to nie jest akcja, dla której otwarte okno ustawień ma się
 /// czymkolwiek tłumaczyć.
-#[allow(dead_code)]
 fn open_file_row(title: &str, path: std::path::PathBuf) -> ActionRow {
     let row = ActionRow::builder()
         .title(title)
@@ -150,7 +139,6 @@ fn open_file_row(title: &str, path: std::path::PathBuf) -> ActionRow {
 /// system plików tylko do odczytu) zamieniłby okno w pułapkę bez wyjścia,
 /// bo `can_close` zostaje `false` na stałe, a jedyna zwykła droga
 /// zamknięcia to udany zapis.
-#[allow(dead_code)]
 pub fn present(
     parent: &ApplicationWindow,
     config: &GtkConfig,

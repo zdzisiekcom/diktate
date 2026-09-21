@@ -52,7 +52,7 @@ use libadwaita::{
     WindowTitle,
 };
 use meter::meter_value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use tray::{DiktateTray, TrayCommand, TrayHandle};
 use view::DocumentView;
@@ -767,6 +767,12 @@ fn build_ui(app: &Application) {
         .icon_name("audio-input-microphone-symbolic")
         .tooltip_text("Nagrywaj")
         .build();
+    // Ustawienia stoją po lewej, zaraz za mikrofonem: prawa strona paska
+    // jest zajęta przez sześć czynności i siódma już się tam nie mieści.
+    let settings_button = gtk4::Button::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text("Ustawienia (Ctrl+,)")
+        .build();
     let copy_button = gtk4::Button::builder()
         .icon_name("edit-copy-symbolic")
         .tooltip_text("Kopiuj do schowka")
@@ -806,6 +812,7 @@ fn build_ui(app: &Application) {
     let header = HeaderBar::new();
     header.set_title_widget(Some(&title_box));
     header.pack_start(&record_button);
+    header.pack_start(&settings_button);
     header.pack_end(&accept_button);
     header.pack_end(&copy_button);
     header.pack_end(&clear_button);
@@ -1041,6 +1048,34 @@ fn build_ui(app: &Application) {
         toast_overlay_for_copy.add_toast(Toast::new("Skopiowano"));
     });
 
+    // Konfiguracja trzymana obok okna ustawień: przy drugim otwarciu ma
+    // pokazać to, co użytkownik zapisał za pierwszym razem, a nie stan
+    // wczytany przy starcie aplikacji.
+    {
+        let window_for_settings = window.clone();
+        let config_for_settings = Rc::new(RefCell::new(config.clone()));
+        let sender_for_settings = Rc::clone(&context_sender);
+        let document_for_settings = Rc::clone(&document);
+        let toast_for_settings = toast_overlay.clone();
+        settings_button.connect_clicked(move |_| {
+            let current = config_for_settings.borrow().clone();
+            let config_slot = Rc::clone(&config_for_settings);
+            let sender = Rc::clone(&sender_for_settings);
+            let document = Rc::clone(&document_for_settings);
+            let toast = toast_for_settings.clone();
+            settings::present(&window_for_settings, &current, move |saved| {
+                // Nowy szablon ma obowiązywać od następnej wypowiedzi, więc
+                // kontekst leci do daemona od razu, bez czekania na zmianę
+                // notatki i bez restartu czegokolwiek. Gdy klienta jeszcze
+                // nie ma, `send_now` nic nie robi — i dobrze.
+                sender.set_config(saved.whisper.clone());
+                *config_slot.borrow_mut() = saved;
+                sender.send_now(&document);
+                toast.add_toast(Toast::new("Zapisano ustawienia"));
+            });
+        });
+    }
+
     wire_correction(
         &correct_button,
         &window,
@@ -1066,6 +1101,7 @@ fn build_ui(app: &Application) {
     let document_for_keys = Rc::clone(&document);
     let redact_button_for_keys = redact_button.clone();
     let correct_button_for_keys = correct_button.clone();
+    let settings_button_for_keys = settings_button.clone();
     shortcuts.connect_key_pressed(move |_, key, _, state| {
         let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
         let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
@@ -1095,6 +1131,12 @@ fn build_ui(app: &Application) {
             }
             gtk4::gdk::Key::Z | gtk4::gdk::Key::z if ctrl && shift => {
                 document_for_keys.redo();
+                gtk4::glib::Propagation::Stop
+            }
+            // `Ctrl+,` to skrót ustawień w całym GNOME — bierzemy go
+            // dokładnie w tej roli.
+            gtk4::gdk::Key::comma if ctrl => {
+                settings_button_for_keys.emit_clicked();
                 gtk4::glib::Propagation::Stop
             }
             // Escape znosi zaznaczenie i wraca do zwykłego wstawiania, bez
