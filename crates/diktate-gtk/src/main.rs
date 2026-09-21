@@ -918,6 +918,23 @@ fn build_ui(app: &Application) {
         context_sender_for_buffer.schedule(&document_for_buffer);
     });
 
+    // Zaznaczenie samo w sobie nie zmienia bufora (`connect_changed` milczy),
+    // a `DocumentView::context_before` liczy ogon od **początku** zaznaczenia
+    // — tam wyląduje kolejna wypowiedź (docs/07). Bez tego haka model widzi
+    // kontekst z końca całego dokumentu, choćby użytkownik zaznaczył zdanie
+    // w środku notatki do podyktowania na nowo. Odbicie 400 ms i porównanie
+    // z ostatnio wysłanym promptem w `ContextSender::schedule` same odsiewają
+    // hałas przeciągania myszą — osobne tłumienie tutaj byłoby zbędne.
+    let context_sender_for_selection = Rc::clone(&context_sender);
+    let document_for_selection = Rc::clone(&document);
+    buffer.connect_mark_set(move |_, _, mark| {
+        let name = mark.name();
+        let name = name.as_deref();
+        if name == Some("insert") || name == Some("selection_bound") {
+            context_sender_for_selection.schedule(&document_for_selection);
+        }
+    });
+
     // Bramka pilnuje, żeby żądanie nagrywania z pustego biurka nie przepadło
     // ani nie skończyło się przyciskiem, który tylko wygląda na wciśnięty.
     let gate = Rc::new(Gate::default());
