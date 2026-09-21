@@ -145,7 +145,11 @@ fn open_file_row(title: &str, path: std::path::PathBuf) -> ActionRow {
 /// Udany zapis woła `on_saved` i domyka okno (`force_close`) — nieudany
 /// zostaje w logu i w `Toast` samego okna ustawień (nie okna głównego pod
 /// spodem — tam właśnie patrzy użytkownik), a okno zostaje otwarte
-/// z nietkniętą treścią pól.
+/// z nietkniętą treścią pól. Toast błędu niesie przycisk „Zamknij bez
+/// zapisywania": bez niego trwały błąd zapisu (katalog bez prawa zapisu,
+/// system plików tylko do odczytu) zamieniłby okno w pułapkę bez wyjścia,
+/// bo `can_close` zostaje `false` na stałe, a jedyna zwykła droga
+/// zamknięcia to udany zapis.
 #[allow(dead_code)]
 pub fn present(
     parent: &ApplicationWindow,
@@ -280,7 +284,22 @@ pub fn present(
             }
             Err(err) => {
                 eprintln!("diktate-gtk: nie udało się zapisać ustawień: {err:#}");
-                dialog.add_toast(Toast::new(&format!("Nie udało się zapisać ustawień: {err}")));
+                // Trwały błąd (katalog bez prawa zapisu, system plików
+                // tylko do odczytu, brak miejsca) powtarzałby się przy
+                // każdej kolejnej próbie zamknięcia — bez tego przycisku
+                // `can_close = false` zamieniłoby okno w pułapkę bez
+                // wyjścia poza ubicie procesu. `set_timeout(0)` trzyma
+                // toast, dopóki ktoś go nie zamknie — kilka sekund
+                // domyślnego czasu nie starcza na przeczytanie błędu
+                // i podjęcie decyzji.
+                let toast = Toast::builder()
+                    .title(format!("Nie udało się zapisać ustawień: {err}"))
+                    .button_label("Zamknij bez zapisywania")
+                    .timeout(0u32)
+                    .build();
+                let dialog_for_toast = dialog.clone();
+                toast.connect_button_clicked(move |_| dialog_for_toast.force_close());
+                dialog.add_toast(toast);
             }
         }
     });
