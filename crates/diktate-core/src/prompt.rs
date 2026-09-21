@@ -250,6 +250,17 @@ mod tests {
     }
 
     #[test]
+    fn trzy_powtorzenia_tuz_pod_progiem_to_jeszcze_nie_petla() {
+        // Próg to cztery wystąpienia tego samego trigramu słów. Trzy — jedno
+        // powtórzenie poniżej granicy — to zdarza się w naturalnej mowie
+        // (np. potwierdzenie powtórzone dla pewności) i strażnik ma to
+        // przepuścić, a nie potraktować jak zapętlony whisper.
+        assert!(!is_looping(
+            "dziękuję za uwagę dziękuję za uwagę dziękuję za uwagę"
+        ));
+    }
+
+    #[test]
     fn slot_oddaje_to_co_przyjal() {
         let slot = PromptSlot::new();
         assert_eq!(slot.get(), "");
