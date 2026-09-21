@@ -117,21 +117,24 @@ modelu dokumentu, więc `Ctrl+Z` cofa ją w całości. Szczegóły i zabezpiecze
 
 | Skrót | Akcja |
 |-------|-------|
-| `Ctrl+C` | Kopiuj całość do schowka |
+| `Ctrl+C` | Kopiuj całość do schowka (zaplanowane) |
 | `Super+C` | Kopiuj i zamknij (przycisk „OK”) |
-| `Ctrl+R` | Podyktuj ponownie zaznaczony fragment (jawne uzbrojenie; przy `implicit_replace` wystarczy zaznaczenie) |
+| `Ctrl+R` | Podyktuj ponownie zaznaczony fragment (jawne uzbrojenie; przy `implicit_replace` wystarczy zaznaczenie; zaplanowane) |
 | `Super+E` | Zredaguj poleceniem głosowym (zaznaczenie albo całą notatkę) |
 | `Super+D` | Popraw tekst modelem językowym |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Cofnij / ponów |
-| `Ctrl+S` | Zapisz do historii |
+| `Ctrl+S` | Zapisz do historii (zaplanowane) |
 | `Ctrl+Space` | Pauza / wznowienie nagrywania |
 | `Ctrl+,` | Otwórz okno ustawień |
 | `Escape` | Anuluj tryb zastępowania; ponownie — odrzuć i zamknij |
 
 Sekcja `[shortcuts]` w `gtk.toml` istnieje w schemacie konfiguracji i jest
-zapisywana przez pisarza, ale **nic jej dziś nie czyta** — wszystkie
-przypisania klawiszy powyżej, z `copy`, `undo`, `redo` i `toggle_recording`
-włącznie, są literałami w kodzie klienta.
+zapisywana przez pisarza, ale **nic jej dziś nie czyta**. Skróty, które okno
+faktycznie obsługuje, są literałami w kodzie klienta: `Super+C`, `Super+E`,
+`Super+D`, `Ctrl+Z`, `Ctrl+Shift+Z`, `Ctrl+,` i `Escape`. `Ctrl+Space` to nie
+skrót okna — rejestruje go środowisko graficzne jako skrót globalny (patrz
+„Skrót globalny” niżej). Wiersze oznaczone wyżej jako „zaplanowane” nie mają
+dziś w kodzie żadnego przypisania klawiszy.
 
 ### „OK” — jedno domknięcie dyktowania
 
