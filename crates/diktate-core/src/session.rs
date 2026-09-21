@@ -110,12 +110,18 @@ impl FrameAssembler {
 
 /// Licznik zaległości kolejki transkrypcji: liczba segmentów czekających w
 /// kolejce plus ten aktualnie transkrybowany. [`Session::start`] dzieli go
-/// (przez `Arc`) między wątek segmentujący, który zwiększa go o 1 po każdym
-/// udanym wysłaniu segmentu do kolejki ([`dispatch_segment`]), a wątek
+/// (przez `Arc`) między wątek segmentujący, który zwiększa go o 1 **przed**
+/// próbą wysłania segmentu do kolejki i natychmiast cofa ten wzrost przez
+/// `dec()`, jeśli wysłanie się nie uda ([`dispatch_segment`]), a wątek
 /// transkrypcji, który zmniejsza go o 1 po zakończeniu obsługi segmentu —
 /// niezależnie od tego, czy wynik trafił do `on_segment`, czy został
-/// odrzucony przez filtr. Segment porzucony z powodu pełnej kolejki nigdy
-/// nie trafił do kolejki, więc licznika nie dotyczy. Przy każdej zmianie
+/// odrzucony przez filtr. Kolejność inc-przed-try_send jest celowa: gdyby
+/// zaległość rosła dopiero po udanym wysłaniu, wątek transkrypcji
+/// teoretycznie mógłby zdążyć odebrać segment i wywołać `dec()`, zanim
+/// `inc()` się wykona, co zeszłoby poniżej zera. Segment porzucony z powodu
+/// pełnej kolejki chwilowo podnosi i od razu cofa licznik, więc efekt netto
+/// jest taki sam, jak dla segmentu, który nigdy nie trafił do kolejki. Przy
+/// każdej zmianie — także przy tym przejściowym podniesieniu i cofnięciu —
 /// woła `on_change` z nową wartością.
 struct Backlog<G> {
     count: AtomicU32,
@@ -320,23 +326,34 @@ fn run_segmenter<G: Fn(u32), L: Fn(Level)>(
 
 /// Wysyła gotowy segment do wątku transkrypcji, nie blokując się. Gdy kolejka
 /// jest pełna (transkrypcja nie nadąża) albo odbiorca już zniknął, segment
-/// jest porzucany z komunikatem na stderr — nigdy nie czekamy. Zaległość
-/// ([`Backlog`]) rośnie tylko wtedy, gdy segment faktycznie trafił do
-/// kolejki — porzucony segment nigdy w niej nie był, więc jej nie zwiększa.
+/// jest porzucany z komunikatem na stderr — nigdy nie czekamy.
+///
+/// `inc()` idzie **przed** `try_send`, nie po nim: gdyby zaległość rosła
+/// dopiero po udanym wysłaniu, wątek transkrypcji teoretycznie mógłby zdążyć
+/// odebrać ten sam segment i wywołać `dec()`, zanim `inc()` tutaj w ogóle się
+/// wykona — licznik zszedłby poniżej zera (panika w debugu, absurdalna
+/// zaległość w release). W praktyce wyścig jest nieosiągalny — transkrypcja
+/// trwa setki milisekund — ale kolejność ma być odporna na to z definicji,
+/// a nie z przypadku. Nieudane wysłanie cofa wzrost przez `dec()`, więc
+/// zaległość netto rośnie tylko dla segmentów, które faktycznie trafiły do
+/// kolejki.
 fn dispatch_segment<G: Fn(u32)>(
     segment_tx: &SyncSender<(u64, Segment, Instant)>,
     seq: u64,
     segment: Segment,
     backlog: &Backlog<G>,
 ) {
+    backlog.inc();
     match segment_tx.try_send((seq, segment, Instant::now())) {
-        Ok(()) => backlog.inc(),
+        Ok(()) => {}
         Err(mpsc::TrySendError::Full(_)) => {
+            backlog.dec();
             eprintln!(
                 "sesja: kolejka transkrypcji pełna — segment porzucony (transkrypcja nie nadąża za mową)"
             );
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
+            backlog.dec();
             eprintln!("sesja: wątek transkrypcji już zakończony — segment porzucony");
         }
     }
@@ -562,9 +579,12 @@ mod tests {
         dispatch_segment(&tx, 0, segment(1.0), &backlog); // trafia do kolejki, licznik = 1
         dispatch_segment(&tx, 1, segment(2.0), &backlog); // kolejka pełna, porzucony
 
+        // Licznik netto zostaje na 1 — drugi segment nigdy nie trafił do
+        // kolejki. `inc()` idzie jednak przed `try_send`, więc dla porzuconego
+        // segmentu widać przejściowe podniesienie do 2 i natychmiastowe
+        // cofnięcie przez `dec()`, zanim wynik dotrze na zewnątrz.
         assert_eq!(backlog.count.load(Ordering::SeqCst), 1);
-        // Callback wołany tylko raz — przy udanym wysłaniu.
-        assert_eq!(*history.borrow(), vec![1]);
+        assert_eq!(*history.borrow(), vec![1, 2, 1]);
     }
 
     #[test]
@@ -640,9 +660,10 @@ mod tests {
         let backlog = Backlog::new(|_| {});
         for seq in 0..ile {
             // Naśladujemy `dispatch_segment`: w prawdziwym potoku `inc()`
-            // zawsze poprzedza wysłanie do kanału, więc `dec()` w
-            // `run_transcriber` ma się do czego odnieść — bez tego licznik
-            // schodziłby poniżej zera i celowo panikowałby.
+            // poprzedza próbę wysłania do kanału (nieudane wysłanie cofa go
+            // przez `dec()`), więc `dec()` w `run_transcriber` zawsze ma się
+            // do czego odnieść — bez tego licznik schodziłby poniżej zera
+            // i celowo panikowałby.
             backlog.inc();
             tx.send((seq as u64, segment(0.1), Instant::now())).unwrap();
         }
