@@ -381,6 +381,17 @@ fn run_transcriber<F, G: Fn(u32)>(
         // przysłany w trakcie mówienia ma działać od następnej wypowiedzi.
         let stored = prompt_slot.get();
         let prompt = prompt::clamp(&stored, config.max_prompt_chars);
+        // `clamp` samo milczy — komunikat o obcięciu należy do wywołującego,
+        // i to tylko wtedy, gdy faktycznie coś obcięło (nie przy każdym
+        // segmencie, bo prompt zwykle mieści się bez problemu).
+        let original_chars = stored.chars().count();
+        let clamped_chars = prompt.chars().count();
+        if clamped_chars < original_chars {
+            eprintln!(
+                "sesja: segment {seq} — prompt obcięty od początku ({original_chars} → {clamped_chars} znaków, limit whisper.context.max_prompt_chars = {})",
+                config.max_prompt_chars
+            );
+        }
         let result = transcriber
             .transcribe(&segment.audio, prompt)
             .and_then(|text| {

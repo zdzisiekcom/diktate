@@ -168,7 +168,14 @@ pub fn present(
     prompt_group.add(&prompt_frame);
     transcription_page.add(&prompt_group);
 
-    let context_group = PreferencesGroup::builder().title("Kontekst").build();
+    let context_group = PreferencesGroup::builder()
+        .title("Kontekst")
+        .description(
+            "Cały prompt ma twardy limit — domyślnie 900 znaków \
+             (whisper.context.max_prompt_chars w daemon.toml) — a nadmiar \
+             jest obcinany od jego początku.",
+        )
+        .build();
     let context_row = SpinRow::with_range(0.0, 1000.0, 50.0);
     context_row.set_title("Znaków przed kursorem");
     context_row.set_value(fields.context_chars as f64);
