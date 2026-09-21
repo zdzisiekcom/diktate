@@ -3,9 +3,19 @@
 //! Prompt powstaje z szablonu użytkownika i ogona tekstu sprzed kursora
 //! (`docs/07#kontekst-dla-whispera`). Wysyłka jest odbita w czasie i
 //! pomijana, gdy prompt się nie zmienił — pisanie z klawiatury zmienia
-//! bufor przy każdym znaku, a gniazdo nie ma tego oglądać.
+//! bufor przy każdym znaku, a gniazdo nie ma tego oglądać. Zaznaczenie
+//! tekstu odbija się tą samą drogą (`main.rs`, `connect_mark_set` na
+//! `insert`/`selection_bound`): to ono przesuwa punkt, od którego liczy się
+//! ogon (`DocumentView::context_before`), więc musi wywoływać tę samą
+//! wysyłkę co zmiana bufora.
+//!
+//! Pusty szablon nie znaczy „nic nie rób" — znaczy „wyślij pusty prompt",
+//! żeby daemon wrócił do własnego `whisper.initial_prompt` zamiast zostać
+//! z ogonem dokumentu sprzed chwili, gdy ktoś skasował pole w ustawieniach.
+//! Wyjątek jest jeden: stan startowy, w którym nic jeszcze nie wysłano —
+//! czyszczenie slotu, który i tak jest pusty, byłoby wysyłką bez powodu.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -30,8 +40,18 @@ pub fn compose(config: &GtkWhisperConfig, before: &str) -> String {
 /// w czasie.
 pub struct ContextSender {
     config: RefCell<GtkWhisperConfig>,
-    last: RefCell<String>,
-    pending: std::cell::Cell<bool>,
+    /// Ostatni prompt potwierdzony wysłany do daemona. `None` znaczy „slot
+    /// uznajemy za pusty" — tak samo stan startowy (nic jeszcze nie
+    /// poszło), jak i stan po udanym wysłaniu pustego promptu; oba mają
+    /// wychodzić z dedupu tak samo, bez rozróżniania.
+    last: RefCell<Option<String>>,
+    /// Wymusza najbliższą wysyłkę niezależnie od `last` — ustawiane przez
+    /// [`Self::set_config`]. Bez tego wyczyszczenie szablonu w ustawieniach
+    /// nigdy by nie doszło do daemona: nowy `composed` bywa pusty tak samo
+    /// jak stan startowy, więc zwykłe porównanie z `last == None` by je
+    /// pomyliło.
+    force: Cell<bool>,
+    pending: Cell<bool>,
     /// Klient dociera później niż okno: połączenie staje w osobnym wątku
     /// i trafia do `Ui::attach`. Do tego czasu kontekst nie ma dokąd iść.
     client: RefCell<Option<Rc<crate::client::Client>>>,
@@ -41,18 +61,21 @@ impl ContextSender {
     pub fn new(config: GtkWhisperConfig) -> Rc<Self> {
         Rc::new(Self {
             config: RefCell::new(config),
-            last: RefCell::new(String::new()),
-            pending: std::cell::Cell::new(false),
+            last: RefCell::new(None),
+            force: Cell::new(false),
+            pending: Cell::new(false),
             client: RefCell::new(None),
         })
     }
 
-    /// Nowe ustawienia z okna ustawień. Kasuje pamięć ostatnio wysłanego
-    /// promptu — zmiana szablonu ma dojść do daemona, choćby dokument
-    /// się nie ruszył.
+    /// Nowe ustawienia z okna ustawień. Następna wysyłka ma polecieć zawsze,
+    /// choćby dokument się nie ruszył i choćby nowy szablon dawał pusty
+    /// prompt — inaczej wyczyszczenie pola w ustawieniach nigdy nie
+    /// dotarłoby do daemona (usterka: pusty szablon zostawiał daemona
+    /// z nieaktualnym kontekstem na zawsze, do restartu klienta).
     pub fn set_config(&self, config: GtkWhisperConfig) {
         *self.config.borrow_mut() = config;
-        self.last.borrow_mut().clear();
+        self.force.set(true);
     }
 
     /// Podłączony klient. Wołane raz, z `Ui::attach`.
@@ -75,26 +98,57 @@ impl ContextSender {
         });
     }
 
-    /// Wysyłka natychmiastowa — po zapisaniu ustawień i przy starcie sesji.
+    /// Wysyłka natychmiastowa — po zapisaniu ustawień, przy starcie sesji
+    /// i po odbiciu z [`Self::schedule`].
     pub fn send_now(&self, document: &Rc<DocumentView>) {
         let Some(client) = self.client.borrow().clone() else {
             return;
         };
         let config = self.config.borrow().clone();
-        if config.prompt.trim().is_empty() {
-            return;
-        }
         let before = document.context_before(config.context_chars);
         let composed = compose(&config, &before);
-        if composed == *self.last.borrow() {
+
+        // `force` jest konsumowany niezależnie od tego, czy w ogóle doszło
+        // do próby wysłania — inaczej ustawienia zapisane bez połączonego
+        // klienta zgubiłyby wymuszenie na starcie tej metody.
+        let force = self.force.take();
+        if !decide(&self.last.borrow(), force, &composed) {
             return;
         }
+
         // Kontekst jest podpowiedzią, nie czynnością użytkownika: nieudana
         // wysyłka trafia do logu i tyle. Okno nie ma o niej krzyczeć.
         match client.send_context(&composed) {
-            Ok(()) => *self.last.borrow_mut() = composed,
+            Ok(()) => {
+                *self.last.borrow_mut() = if composed.is_empty() {
+                    None
+                } else {
+                    Some(composed)
+                };
+            }
             Err(err) => eprintln!("diktate-gtk: nie udało się wysłać kontekstu: {err:#}"),
         }
+    }
+}
+
+/// Rozstrzyga, czy `send_now` ma faktycznie wywołać `send_context` —
+/// wydzielone z ciała metody, żeby dało się to sprawdzić bez gniazda,
+/// klienta i GTK-a.
+///
+/// `force` (ustawiane przez [`ContextSender::set_config`]) omija dedup
+/// całkowicie: zmiana w oknie ustawień ma dojść do daemona zawsze, także
+/// gdy nowy `composed` jest pusty tak samo jak stan startowy. Bez `force`
+/// wysyłka leci, gdy `composed` różni się od ostatnio potwierdzonego —
+/// a przy `last == None` (nic jeszcze nie wysłano) tylko wtedy, gdy
+/// `composed` nie jest puste, bo czyszczenie pustego slotu byłoby wysyłką
+/// bez powodu.
+fn decide(last: &Option<String>, force: bool, composed: &str) -> bool {
+    if force {
+        return true;
+    }
+    match last {
+        Some(prev) => prev != composed,
+        None => !composed.is_empty(),
     }
 }
 
@@ -130,5 +184,44 @@ mod tests {
     fn zerowa_dlugosc_kontekstu_daje_sam_szablon() {
         let out = compose(&config("Terminy: ggml.\n{kontekst}", 0), "Ostatnie zdanie.");
         assert_eq!(out, "Terminy: ggml.");
+    }
+
+    // --- decide: usterka „wyczyszczenie szablonu nie czyści slotu" ---
+
+    #[test]
+    fn stan_startowy_z_pustym_promptem_nie_wysyla_niczego() {
+        // Nic jeszcze nie wysłano, a nowy prompt też jest pusty — nie ma
+        // czego czyścić w slocie, który i tak jest pusty.
+        assert!(!decide(&None, false, ""));
+    }
+
+    #[test]
+    fn pierwsza_wysylka_niepustego_promptu_leci() {
+        assert!(decide(&None, false, "Terminy: ggml."));
+    }
+
+    #[test]
+    fn wyczyszczenie_szablonu_po_niepustym_promptcie_wysyla_puste() {
+        // Sedno usterki: był wysłany niepusty prompt, teraz szablon jest
+        // pusty — musi polecieć czyszczenie, a nie cisza.
+        assert!(decide(&Some("Terminy: ggml.".to_string()), false, ""));
+    }
+
+    #[test]
+    fn niezmieniony_prompt_nie_wysyla_sie_ponownie() {
+        assert!(!decide(
+            &Some("Terminy: ggml.".to_string()),
+            false,
+            "Terminy: ggml."
+        ));
+    }
+
+    #[test]
+    fn wymuszenie_po_ustawieniach_wysyla_mimo_pustego_i_niezmienionego() {
+        // `force` (ustawienia zapisane) omija dedup całkowicie — nawet gdy
+        // stan startowy sugerowałby ciszę, a nawet gdy prompt się nie
+        // zmienił.
+        assert!(decide(&None, true, ""));
+        assert!(decide(&Some("Terminy: ggml.".to_string()), true, "Terminy: ggml."));
     }
 }
