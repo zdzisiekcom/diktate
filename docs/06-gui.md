@@ -125,6 +125,7 @@ modelu dokumentu, więc `Ctrl+Z` cofa ją w całości. Szczegóły i zabezpiecze
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Cofnij / ponów |
 | `Ctrl+S` | Zapisz do historii |
 | `Ctrl+Space` | Pauza / wznowienie nagrywania |
+| `Ctrl+,` | Otwórz okno ustawień |
 | `Escape` | Anuluj tryb zastępowania; ponownie — odrzuć i zamknij |
 
 Wszystkie konfigurowalne w `gtk.toml`, sekcja `[shortcuts]`.
@@ -175,7 +176,11 @@ jest błędem, nawet jeśli działa.
 **Okno bez osobnego paska tytułowego.** `adw::ApplicationWindow` z
 `adw::ToolbarView` i `adw::HeaderBar` jako górnym paskiem. Nigdy
 `gtk::ApplicationWindow` z `set_titlebar` — to daje odcięty pasek systemowy
-zamiast paska wtopionego w okno, co od razu wygląda obco na GNOME.
+zamiast paska wtopionego w okno, co od razu wygląda obco na GNOME. Wyjątek:
+okno ustawień to `adw::PreferencesDialog` — ten typ niesie układ
+`ToolbarView`/`HeaderBar` w sobie i jest natywnym wzorcem GNOME dla ustawień,
+więc osobne składanie go od zera byłoby robieniem gorzej tego, co widżet już
+robi dobrze. Reszta konwencji na tej liście obowiązuje go bez zmian.
 
 **Motyw idzie za systemem.** `adw::StyleManager` z `ColorScheme::Default`.
 Nie wymuszamy jasnego ani ciemnego, nie doklejamy własnych kolorów tła,
@@ -309,18 +314,51 @@ okno nie obiecuje nagrania, którego nie będzie.
 ## Okno ustawień
 
 Na tym etapie **celowo minimalne**. Konfiguracja odbywa się w plikach TOML
-([04-konfiguracja.md](04-konfiguracja.md)), a okno ustawień pokrywa tylko to,
-czego nie da się sensownie zrobić edytorem tekstu:
+([04-konfiguracja.md](04-konfiguracja.md)), a okno ustawień
+(`crates/diktate-gtk/src/settings.rs`, `adw::PreferencesDialog`) pokrywa tylko
+to, czego nie da się sensownie zrobić edytorem tekstu: szablon promptu
+whispera, z którego trzeba **widzieć**, gdzie wchodzi kontekst, i próg jego
+długości, plus ustawienia korekty LLM-em, które inaczej żyłyby tylko
+w literałach TOML.
 
-- wybór urządzenia audio z listy (z podglądem poziomu na żywo)
-- pobieranie i przełączanie modeli (pasek postępu)
-- przycisk „Otwórz plik konfiguracyjny" dla reszty
-- zakładka „Akcje głosowe" — edytor reguł agenta ([05-agent.md](05-agent.md))
+Dwie strony:
+
+- **Transkrypcja** (`audio-input-microphone-symbolic`) — grupa „Prompt
+  whispera" z wielolinijkową kartą tekstową i opisem tłumaczącym `{kontekst}`;
+  grupa „Kontekst" ze `SpinRow` „Znaków przed kursorem" (0–1000, krok 50);
+  grupa „Pliki" z wierszami otwierającymi `gtk.toml` i `daemon.toml`
+  w domyślnym edytorze — reszta obu plików zostaje poza oknem.
+- **Korekta** (`text-editor-symbolic`) — grupa „Serwer" (włącznik, adres,
+  model), osobne grupy „Prompt korektora" i „Prompt redaktora" z kartami
+  tekstowymi i opisem różnicy między nimi, grupa „Progi" z dwoma `SpinRow`
+  odsetków zmian i jednym liczby słów. `api_key`, `temperature`, `max_tokens`,
+  `timeout_ms` i szablony `user_template`/`redaction_user_template` zostają
+  w pliku — to strojenie, nie ustawienia, i okno ma ich nie ruszać, żeby
+  otwarcie go nigdy nie skasowało klucza API.
+
+Zapis idzie do `gtk.toml` przez `GtkConfig::save()` — ten sam pisarz, którego
+używa kreator `diktate setup` ([04](04-konfiguracja.md#kreator-diktate-setup)),
+atomowo i z kopią `.bak`. Udany zapis zamyka okno, pokazuje `Toast`
+„Zapisano ustawienia" w oknie głównym i od razu wysyła nowy kontekst do
+daemona — zmiana obowiązuje od następnej wypowiedzi, bez restartu czegokolwiek.
+Nieudany zapis zostawia okno ustawień otwarte, z nietkniętą treścią pól, i
+pokazuje błąd `Toast`-em w **samym oknie ustawień**, nie w oknie głównym pod
+spodem — tam akurat patrzy użytkownik w tej chwili. Ten toast ma przycisk
+„Zamknij bez zapisywania": bez niego trwale nieudany zapis (katalog bez prawa
+zapisu, dysk pełny) zostawiałby okno, którego nie da się zamknąć zwyczajnie,
+bo jedyna zwykła droga zamknięcia to udany zapis.
+
+Przycisk otwierający okno: `emblem-system-symbolic`, `pack_start` zaraz za
+przyciskiem mikrofonu — prawa strona paska jest zajęta przez sześć akcji
+i siódma się tam nie mieści. Skrót `Ctrl+,`, jak w całym GNOME.
 
 Które opcje przenieść do GUI na stałe, zdecydujemy po okresie używania
-aplikacji. Wcześniejsze budowanie pełnego panelu ustawień oznaczałoby
-utrzymywanie dwóch ścieżek konfiguracji dla opcji, które być może nigdy nie
-zostaną dotknięte po pierwszym strojeniu.
+aplikacji. Poza oknem zostają na razie: wybór urządzenia audio z listy,
+pobieranie i przełączanie modeli (wymagają `model.list`/`model.pull` i
+pisania po `daemon.toml` — osobna robota) i zakładka „Akcje głosowe" — edytor
+reguł agenta ([05-agent.md](05-agent.md)). Wcześniejsze budowanie pełnego
+panelu ustawień oznaczałoby utrzymywanie dwóch ścieżek konfiguracji dla
+opcji, które być może nigdy nie zostaną dotknięte po pierwszym strojeniu.
 
 ## Uruchamianie daemona przez klienta
 

@@ -205,15 +205,26 @@ Prototyp podawał ostatnie ~1200 znaków z pola tekstowego i był to jeden
 z wyraźniej odczuwalnych efektów.
 
 W diktate kontekstem jest **tekst dokumentu przed punktem wstawiania**
-(a przy uzbrojonym zastąpieniu — tekst przed zaznaczeniem), nie surowy log
-transkrypcji. Różnica ma znaczenie: jeśli użytkownik poprawił błędnie
-rozpoznane nazwisko, model ma zobaczyć wersję poprawioną, a nie własną pomyłkę
-sprzed minuty.
+(a przy uzbrojonym zastąpieniu — tekst przed **początkiem zaznaczenia**, bo
+tam trafi nowy tekst), nie surowy log transkrypcji. Różnica ma znaczenie:
+jeśli użytkownik poprawił błędnie rozpoznane nazwisko, model ma zobaczyć
+wersję poprawioną, a nie własną pomyłkę sprzed minuty. Tę samą drogę
+przechodzą więc segmenty od daemona i ręczne poprawki z klawiatury.
 
 Daemon nie zna dokumentu, więc kontekst dostarcza klient metodą
-`session.context` ([02](02-protokol-ipc.md#kontekst-transkrypcji)). Jest to
-podpowiedź, nie zobowiązanie — daemon transkrybuje normalnie także wtedy, gdy
-żaden klient kontekstu nie przysłał.
+`session.context` ([02](02-protokol-ipc.md#kontekst-transkrypcji)) — prompt,
+który dostaje whisper, to szablon z `gtk.toml` (`[whisper] prompt`) ze
+sklejonym w miejscu `{kontekst}` ogonem dokumentu, obciętym do
+`context_chars`. Wysyłka idzie po każdej zmianie bufora, z odbiciem 400 ms
+(inaczej pisanie z klawiatury zmieniałoby prompt przy każdym znaku), i jest
+pomijana, gdy sklejony prompt nie różni się od ostatnio wysłanego — sam ruch
+karetki bez edycji tekstu niczego więc nie wysyła. Pusty szablon znaczy
+„nie wysyłaj kontekstu w ogóle": daemon zostaje wtedy przy
+`whisper.initial_prompt` z `daemon.toml`, czyli zachowaniu sprzed tej funkcji,
+i to jest wartość domyślna.
+
+Jest to podpowiedź, nie zobowiązanie — daemon transkrybuje normalnie także
+wtedy, gdy żaden klient kontekstu nie przysłał.
 
 Zabezpieczenie przed zapętleniem (`repetition_guard`) zostaje: prompt potrafi
 skłonić model do powtórzenia własnego kontekstu zamiast transkrypcji, więc
