@@ -1065,18 +1065,32 @@ fn build_ui(app: &Application) {
         toast_overlay_for_copy.add_toast(Toast::new("Skopiowano"));
     });
 
-    // Konfiguracja trzymana obok okna ustawień: przy drugim otwarciu ma
-    // pokazać to, co użytkownik zapisał za pierwszym razem, a nie stan
-    // wczytany przy starcie aplikacji.
+    // Okno ustawień samo zachęca do edycji `gtk.toml` w edytorze tekstu
+    // (wiersz „Otwórz gtk.toml") w trakcie, gdy dialog jest wciąż otwarty —
+    // więc podstawą przy każdym otwarciu ma być świeży odczyt z dysku, a nie
+    // migawka z pamięci sprzed startu aplikacji albo sprzed poprzedniego
+    // zapisu. `fallback_config` to wyłącznie awaryjna kopia na wypadek, gdy
+    // odczyt pliku się nie uda (np. przejściowy błąd I/O) — bez niej okno
+    // ustawień nie miałoby czym się otworzyć.
     {
         let window_for_settings = window.clone();
-        let config_for_settings = Rc::new(RefCell::new(config.clone()));
+        let fallback_config = Rc::new(RefCell::new(config.clone()));
         let sender_for_settings = Rc::clone(&context_sender);
         let document_for_settings = Rc::clone(&document);
         let toast_for_settings = toast_overlay.clone();
         settings_button.connect_clicked(move |_| {
-            let current = config_for_settings.borrow().clone();
-            let config_slot = Rc::clone(&config_for_settings);
+            let current = match GtkConfig::load() {
+                Ok(loaded) => loaded,
+                Err(err) => {
+                    eprintln!(
+                        "diktate-gtk: nie udało się wczytać {} przed otwarciem ustawień, \
+                         używam kopii z pamięci: {err:#}",
+                        GtkConfig::path().display()
+                    );
+                    fallback_config.borrow().clone()
+                }
+            };
+            let fallback_slot = Rc::clone(&fallback_config);
             let sender = Rc::clone(&sender_for_settings);
             let document = Rc::clone(&document_for_settings);
             let toast = toast_for_settings.clone();
@@ -1086,7 +1100,7 @@ fn build_ui(app: &Application) {
                 // notatki i bez restartu czegokolwiek. Gdy klienta jeszcze
                 // nie ma, `send_now` nic nie robi — i dobrze.
                 sender.set_config(saved.whisper.clone());
-                *config_slot.borrow_mut() = saved;
+                *fallback_slot.borrow_mut() = saved;
                 sender.send_now(&document);
                 toast.add_toast(Toast::new("Zapisano ustawienia"));
             });
