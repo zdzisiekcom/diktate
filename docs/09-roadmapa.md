@@ -47,7 +47,6 @@ Cel: zaznaczam fragment, dyktuję go od nowa, zostaje zastąpiony.
 - Pełny model dokumentu: kotwice, `Splice`, log operacji, redo
 - Zastępowanie uzbrajane samym zaznaczeniem, `Ctrl+R` jako wariant jawny,
   rozstrzyganie po `audio_start_ms`
-- Kontekst promptu z dokumentu (`session.context`)
 - Edycja klawiaturą jako operacje w tym samym logu
 - Zapis historii: `raw.ndjson`, `ops.ndjson`, `note.md`
 - Przeglądarka historii w tray-u
