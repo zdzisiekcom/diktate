@@ -149,6 +149,12 @@ impl Client {
         self.send(METHOD_SESSION_STOP)
     }
 
+    /// Przysyła daemonowi gotowy prompt dla whispera. To **podpowiedź**:
+    /// nieudana wysyłka nie jest awarią sesji, a pusty tekst czyści slot.
+    pub fn send_context(&self, text: &str) -> Result<()> {
+        self.send_request(&Request::context(self.take_id(), text))
+    }
+
     fn take_id(&self) -> u64 {
         let id = self.next_id.get();
         self.next_id.set(id + 1);

@@ -175,21 +175,28 @@ Kontekst poprawia spójność pisowni nazw własnych i stylu, ale wewnętrzny
 mechanizm whispera (przenoszenie tokenów) jest niewidoczny i niesterowalny,
 a jedna wpadka potrafi rozkręcić model w pętlę powtarzania tej samej frazy.
 
-Dlatego kontekst jest budowany **jawnie po naszej stronie**: do
-`initial_prompt` doklejany jest ogon poprzedniej transkrypcji
-(`whisper.context.chars`, domyślnie 200 znaków). Widzimy dokładnie, co model
-dostał, i możemy to obciąć lub porzucić.
+Dlatego kontekst jest budowany **jawnie po naszej stronie**, i to po stronie
+**klienta**: prompt składa się z szablonu (`gtk.toml`, `[whisper] prompt`)
+i ogona dokumentu sprzed punktu wstawiania (`context_chars`, domyślnie 200
+znaków), po czym leci do daemona metodą `session.context`
+([02](02-protokol-ipc.md#kontekst-transkrypcji)). Tekst od klienta **nadpisuje**
+`whisper.initial_prompt`, nie dokleja się do niego — co użytkownik widzi
+w oknie ustawień, ma być dokładnie tym, co dostaje model, a doklejanie
+z przodu niewidocznego zdania z `daemon.toml` łamałoby tę obietnicę.
+`initial_prompt` obowiązuje więc tylko wtedy, gdy klient kontekstu nie
+przysyła (`diktate-cli record`, `--example bench-model`, cudze klienty).
 
 **Strażnik pętli** (`repetition_guard`): jeśli nowy segment jest w znacznej
-części powtórzeniem poprzedniego (podobieństwo powyżej
-`repetition_threshold`) lub zawiera zapętloną frazę, segment jest liczony
-ponownie bez kontekstu. Domyślnie kontekst włączony.
+części powtórzeniem promptu (podobieństwo powyżej `repetition_threshold`) lub
+zawiera zapętloną frazę, segment leci drugi raz z pustym promptem, a do
+klienta idzie wynik tego drugiego przebiegu. Domyślnie kontekst włączony.
 
 ### Prompt
 
 `initial_prompt` z konfiguracji — słownictwo branżowe, nazwy własne,
 preferowana interpunkcja. Definiowalny per profil językowy. To główna dźwignia
-jakości transkrypcji polskiej.
+jakości transkrypcji polskiej tam, gdzie nikt szablonu z `[whisper] prompt`
+nie przysyła (wyżej) — w kliencie GTK tę rolę przejmuje ten szablon.
 
 ### Filtr halucynacji
 

@@ -661,6 +661,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "diktate-config",
+ "diktate-core",
  "diktate-document",
  "diktate-proto",
  "gtk4",

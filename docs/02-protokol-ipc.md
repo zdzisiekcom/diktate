@@ -69,21 +69,36 @@ bieżącej sesji.
 | `session.context` | `{ text: string }` | `{ chars }` |
 
 Klient przysyła ogon tekstu **poprzedzającego punkt wstawiania** (a przy
-uzbrojonym zastąpieniu — poprzedzającego zaznaczenie), obcięty do
-`whisper.context.chars`. Daemon używa go jako `prompt` przy kolejnych
-segmentach, dzięki czemu model trzyma terminologię i pisownię nazw własnych.
+uzbrojonym zastąpieniu — poprzedzającego zaznaczenie), już sklejony z szablonu
+promptu i obcięty do `[whisper] context_chars` z `gtk.toml`
+([04](04-konfiguracja.md#gtktoml)) — to klient zna dokument i wie, gdzie
+w nim kończy się szablon, a zaczyna kontekst, więc obcinanie do długości robi
+on, nie daemon. Daemon trzyma otrzymany tekst jako `prompt` w slocie
+połączenia i podaje go silnikowi przy każdym kolejnym segmencie; jedyne, co
+sam sobie dolicza, to awaryjne obcięcie promptu do `whisper.context.max_prompt_chars`
+z `daemon.toml`, na wypadek gdyby ktoś przysłał więcej, niż rozsądnie
+zmieści się w oknie whispera.
 
 Wywołanie jest **podpowiedzią, nie zobowiązaniem**: daemon transkrybuje
-normalnie także wtedy, gdy nikt kontekstu nie przysłał, a przy
-`whisper.context.source = "transcript"` ignoruje go i bierze ogon własnego
-logu. Kierunek jest jednostronny — daemon nie zna dokumentu i nie próbuje go
-poznać; dostaje tylko ciąg znaków do promptu.
+normalnie także wtedy, gdy nikt kontekstu nie przysłał, a pusty `text`
+czyści slot. Kierunek jest jednostronny — daemon nie zna dokumentu i nie
+próbuje go poznać; dostaje tylko ciąg znaków do promptu. Branie ogona
+z własnego logu transkrypcji zamiast od klienta (`whisper.context.source =
+"transcript"`) zostaje pomysłem na przyszłość — dziś nie ma journalu,
+z którego dałoby się taki ogon wziąć.
 
 Powód, dla którego kontekst pochodzi od klienta, a nie z logu transkrypcji:
 w logu jest to, co whisper *usłyszał*, a w dokumencie to, co użytkownik
 *zatwierdził*. Po poprawieniu błędnie rozpoznanego nazwiska model ma widzieć
 wersję poprawioną. Szczegóły w
 [07](07-zachowanie-dyktowania.md#kontekst-dla-whispera).
+
+`Request::params` niesie to razem z `session.subscribe` w jednym typie,
+`RequestParams` (`#[serde(untagged)]`) — JSON-RPC nie ma znacznika wariantu,
+więc rozstrzyga kształt obiektu. Oba warianty, `Subscription` i
+`ContextParams`, mają `deny_unknown_fields`: bez tego `Subscription` (same
+pola z wartością domyślną) dopasowałaby się do dowolnego obiektu, w tym do
+`{"text": "…"}`, i kontekst zniknąłby po cichu jako pusta subskrypcja.
 
 ### Modele i konfiguracja
 

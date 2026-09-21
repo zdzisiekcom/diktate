@@ -107,7 +107,7 @@ fn record(
     };
 
     let started = Instant::now();
-    let text = transcriber.transcribe(&samples)?;
+    let text = transcriber.transcribe(&samples, "")?;
     eprintln!("Gotowe w {:.1} s.", started.elapsed().as_secs_f32());
     println!("{text}");
     Ok(())

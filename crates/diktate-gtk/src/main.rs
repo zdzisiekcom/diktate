@@ -30,10 +30,12 @@
 //! samo i żadne nie może zamazać pozostałych.
 
 mod client;
+mod context;
 mod correct;
 mod daemon;
 mod meter;
 mod redact;
+mod settings;
 mod shortcut;
 mod tray;
 mod view;
@@ -50,7 +52,7 @@ use libadwaita::{
     WindowTitle,
 };
 use meter::meter_value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use tray::{DiktateTray, TrayCommand, TrayHandle};
 use view::DocumentView;
@@ -477,6 +479,7 @@ struct Ui {
     level_bar: LevelBar,
     record_button: ToggleButton,
     document: Rc<DocumentView>,
+    context: Rc<context::ContextSender>,
     tray: Option<TrayHandle>,
     show_level_meter: bool,
     gate: Rc<Gate>,
@@ -559,6 +562,7 @@ impl Ui {
             level_bar,
             record_button,
             document,
+            context,
             tray,
             show_level_meter,
             gate,
@@ -574,6 +578,9 @@ impl Ui {
                 eprintln!("diktate-gtk: nie udało się włączyć odczytów poziomu: {err:#}");
             }
         }
+        // Klient właśnie stanął — od tej chwili kontekst ma dokąd iść.
+        context.set_client(Rc::clone(&client));
+        context.send_now(&document);
         subtitle.set_session(SessionState::Idle, 0);
         record_button.set_sensitive(true);
         backlog_spinner.set_visible(false);
@@ -682,6 +689,10 @@ impl Ui {
             if let Err(err) = result {
                 subtitle.say(&format!("Błąd: {err}"));
                 button.set_active(false);
+            } else if button.is_active() {
+                // Pierwszy segment ma już mieć kontekst — nie dopiero ten
+                // po pierwszym odbiciu z bufora.
+                context.send_now(&document);
             }
         });
 
@@ -756,6 +767,12 @@ fn build_ui(app: &Application) {
         .icon_name("audio-input-microphone-symbolic")
         .tooltip_text("Nagrywaj")
         .build();
+    // Ustawienia stoją po lewej, zaraz za mikrofonem: prawa strona paska
+    // jest zajęta przez sześć czynności i siódma już się tam nie mieści.
+    let settings_button = gtk4::Button::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text("Ustawienia (Ctrl+,)")
+        .build();
     let copy_button = gtk4::Button::builder()
         .icon_name("edit-copy-symbolic")
         .tooltip_text("Kopiuj do schowka")
@@ -795,6 +812,7 @@ fn build_ui(app: &Application) {
     let header = HeaderBar::new();
     header.set_title_widget(Some(&title_box));
     header.pack_start(&record_button);
+    header.pack_start(&settings_button);
     header.pack_end(&accept_button);
     header.pack_end(&copy_button);
     header.pack_end(&clear_button);
@@ -834,6 +852,10 @@ fn build_ui(app: &Application) {
     // Model dokumentu podpięty pod bufor. Od tej chwili bufor jest widokiem,
     // a nie źródłem prawdy.
     let document = DocumentView::attach(&text_view, config.dictation.clone());
+
+    // Sender kontekstu whispera: żyje od razu, choć klient dociera dopiero
+    // z połączeniem w tle (`Ui::attach`) — patrz `context`.
+    let context_sender = context::ContextSender::new(config.whisper.clone());
 
     // Trwająca korekta albo redakcja: przyciski i podtytuł muszą o niej
     // wiedzieć niezależnie od siebie, a sygnał zmiany bufora chodzi też
@@ -877,6 +899,8 @@ fn build_ui(app: &Application) {
     let correct_button_for_buffer = correct_button.clone();
     let busy_for_buffer = Rc::clone(&busy);
     let redact_button_for_buffer = redact_button.clone();
+    let context_sender_for_buffer = Rc::clone(&context_sender);
+    let document_for_buffer = Rc::clone(&document);
     buffer.connect_changed(move |buffer| {
         let empty = buffer.char_count() == 0;
         let page = if empty { PAGE_EMPTY } else { PAGE_TEXT };
@@ -888,6 +912,27 @@ fn build_ui(app: &Application) {
         // Redakcja rządzi się tym samym: w trakcie dyktowania jest czynna,
         // bo wypowiedzi sprzed otwarcia okna polecenia odsiewa znacznik.
         redact_button_for_buffer.set_sensitive(!empty && !busy_for_buffer.get());
+        // Kontekst dla whispera idzie po każdej zmianie notatki — z daemona
+        // i z klawiatury tak samo. Model ma widzieć wersję zatwierdzoną,
+        // a nie własną pomyłkę sprzed minuty (docs/07).
+        context_sender_for_buffer.schedule(&document_for_buffer);
+    });
+
+    // Zaznaczenie samo w sobie nie zmienia bufora (`connect_changed` milczy),
+    // a `DocumentView::context_before` liczy ogon od **początku** zaznaczenia
+    // — tam wyląduje kolejna wypowiedź (docs/07). Bez tego haka model widzi
+    // kontekst z końca całego dokumentu, choćby użytkownik zaznaczył zdanie
+    // w środku notatki do podyktowania na nowo. Odbicie 400 ms i porównanie
+    // z ostatnio wysłanym promptem w `ContextSender::schedule` same odsiewają
+    // hałas przeciągania myszą — osobne tłumienie tutaj byłoby zbędne.
+    let context_sender_for_selection = Rc::clone(&context_sender);
+    let document_for_selection = Rc::clone(&document);
+    buffer.connect_mark_set(move |_, _, mark| {
+        let name = mark.name();
+        let name = name.as_deref();
+        if name == Some("insert") || name == Some("selection_bound") {
+            context_sender_for_selection.schedule(&document_for_selection);
+        }
     });
 
     // Bramka pilnuje, żeby żądanie nagrywania z pustego biurka nie przepadło
@@ -1004,6 +1049,7 @@ fn build_ui(app: &Application) {
         level_bar: level_bar.clone(),
         record_button: record_button.clone(),
         document: Rc::clone(&document),
+        context: Rc::clone(&context_sender),
         tray: tray_handle,
         show_level_meter: config.window.show_level_meter,
         gate,
@@ -1018,6 +1064,48 @@ fn build_ui(app: &Application) {
         button.clipboard().set_text(&document_for_copy.text());
         toast_overlay_for_copy.add_toast(Toast::new("Skopiowano"));
     });
+
+    // Okno ustawień samo zachęca do edycji `gtk.toml` w edytorze tekstu
+    // (wiersz „Otwórz gtk.toml") w trakcie, gdy dialog jest wciąż otwarty —
+    // więc podstawą przy każdym otwarciu ma być świeży odczyt z dysku, a nie
+    // migawka z pamięci sprzed startu aplikacji albo sprzed poprzedniego
+    // zapisu. `fallback_config` to wyłącznie awaryjna kopia na wypadek, gdy
+    // odczyt pliku się nie uda (np. przejściowy błąd I/O) — bez niej okno
+    // ustawień nie miałoby czym się otworzyć.
+    {
+        let window_for_settings = window.clone();
+        let fallback_config = Rc::new(RefCell::new(config.clone()));
+        let sender_for_settings = Rc::clone(&context_sender);
+        let document_for_settings = Rc::clone(&document);
+        let toast_for_settings = toast_overlay.clone();
+        settings_button.connect_clicked(move |_| {
+            let current = match GtkConfig::load() {
+                Ok(loaded) => loaded,
+                Err(err) => {
+                    eprintln!(
+                        "diktate-gtk: nie udało się wczytać {} przed otwarciem ustawień, \
+                         używam kopii z pamięci: {err:#}",
+                        GtkConfig::path().display()
+                    );
+                    fallback_config.borrow().clone()
+                }
+            };
+            let fallback_slot = Rc::clone(&fallback_config);
+            let sender = Rc::clone(&sender_for_settings);
+            let document = Rc::clone(&document_for_settings);
+            let toast = toast_for_settings.clone();
+            settings::present(&window_for_settings, &current, move |saved| {
+                // Nowy szablon ma obowiązywać od następnej wypowiedzi, więc
+                // kontekst leci do daemona od razu, bez czekania na zmianę
+                // notatki i bez restartu czegokolwiek. Gdy klienta jeszcze
+                // nie ma, `send_now` nic nie robi — i dobrze.
+                sender.set_config(saved.whisper.clone());
+                *fallback_slot.borrow_mut() = saved;
+                sender.send_now(&document);
+                toast.add_toast(Toast::new("Zapisano ustawienia"));
+            });
+        });
+    }
 
     wire_correction(
         &correct_button,
@@ -1044,6 +1132,7 @@ fn build_ui(app: &Application) {
     let document_for_keys = Rc::clone(&document);
     let redact_button_for_keys = redact_button.clone();
     let correct_button_for_keys = correct_button.clone();
+    let settings_button_for_keys = settings_button.clone();
     shortcuts.connect_key_pressed(move |_, key, _, state| {
         let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
         let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
@@ -1073,6 +1162,12 @@ fn build_ui(app: &Application) {
             }
             gtk4::gdk::Key::Z | gtk4::gdk::Key::z if ctrl && shift => {
                 document_for_keys.redo();
+                gtk4::glib::Propagation::Stop
+            }
+            // `Ctrl+,` to skrót ustawień w całym GNOME — bierzemy go
+            // dokładnie w tej roli.
+            gtk4::gdk::Key::comma if ctrl => {
+                settings_button_for_keys.emit_clicked();
                 gtk4::glib::Propagation::Stop
             }
             // Escape znosi zaznaczenie i wraca do zwykłego wstawiania, bez

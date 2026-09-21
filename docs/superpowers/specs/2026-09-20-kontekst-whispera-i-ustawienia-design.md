@@ -254,10 +254,14 @@ i porzucany, bo kontekst to podpowiedź, a nie akcja użytkownika.
 `api_key`, `temperature`, `max_tokens`, `timeout_ms` i szablony
 `user_template` zostają w pliku — to strojenie, nie ustawienia.
 
-Zapis przy zamknięciu okna. Po zapisie: `Toast` w oknie głównym
+Zapis przy zamknięciu okna. Po udanym zapisie: `Toast` w oknie głównym
 („Zapisano ustawienia”), przeliczenie promptu i natychmiastowa wysyłka
 nowego kontekstu — zmiana ma być widoczna w następnej wypowiedzi, bez
-restartu czegokolwiek.
+restartu czegokolwiek. Nieudany zapis pokazuje `Toast` z błędem w **samym
+oknie ustawień**, nie w oknie głównym pod spodem — tam akurat patrzy
+użytkownik — i zostawia okno otwarte. Ten toast niesie przycisk „Zamknij
+bez zapisywania”: bez niego trwały błąd zapisu zamieniłby okno w pułapkę
+bez wyjścia, bo jedyna zwykła droga zamknięcia to udany zapis.
 
 Przycisk otwierający: `pack_start` zaraz za przyciskiem mikrofonu (prawa
 strona paska jest zajęta przez sześć akcji i siódma się tam nie mieści),
@@ -270,7 +274,7 @@ ikona `emblem-system-symbolic`, tooltip „Ustawienia”, skrót `Ctrl+,`.
 | Prompt dłuższy niż `max_prompt_chars` | Daemon obcina od początku i pisze o tym w logu; transkrypcja idzie dalej |
 | Segment jest echem promptu | Drugi przebieg bez promptu, wpis w logu |
 | `session.context` bez daemona | Błąd logowany i porzucony — kontekst to podpowiedź |
-| Nieudany zapis `gtk.toml` | `Toast` z treścią błędu; okno zostaje otwarte, ustawienia niezapisane |
+| Nieudany zapis `gtk.toml` | `Toast` z treścią błędu **w oknie ustawień** (nie w oknie głównym — tam patrzy użytkownik), z przyciskiem „Zamknij bez zapisywania”; okno zostaje otwarte, ustawienia niezapisane |
 | Szablon bez `{kontekst}` | Poprawny stan: prompt stały, kontekst nie wchodzi |
 | Pusty szablon | Kontekst nie jest wysyłany wcale; daemon używa `whisper.initial_prompt` |
 

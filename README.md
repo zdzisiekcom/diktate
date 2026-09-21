@@ -233,7 +233,7 @@ wartościami jako domyślnymi i listą różnic przed zapisem. `diktate setup
 | `diktate-config` | `daemon.toml` i `gtk.toml` — wczytywanie i walidacja. |
 | `diktate-daemon` | Serwer nasłuchujący na gnieździe, prowadzący sesję dyktowania. |
 | `diktate-cli` | Klient terminalowy — `record` do testowania bez interfejsu, `setup` (kreator konfiguracji) i `model list/pull`. |
-| `diktate-gtk` | Interfejs graficzny (GTK 4 + libadwaita): okno, tray, skrót globalny. |
+| `diktate-gtk` | Interfejs graficzny (GTK 4 + libadwaita): okno, tray, skrót globalny, okno ustawień promptu whispera i korekty (`Ctrl+,`). |
 
 ## Czego jeszcze nie ma
 

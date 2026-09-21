@@ -63,8 +63,14 @@ model = ""                    # ścieżka ggml; puste = $DIKTATE_MODEL,
                               # potem ~/.diktate/models/ggml-small-q5_1.bin
 threads = 0                   # 0 = decyzja whispera
 language = "pl"               # kod ISO albo "auto"
-initial_prompt = ""           # terminologia i nazwy własne
+initial_prompt = ""           # terminologia i nazwy własne; obowiązuje tylko,
+                              # gdy żaden klient nie przysłał session.context
 beam_size = 1                 # 1 = dekodowanie zachłanne
+
+[whisper.context]
+max_prompt_chars = 900     # twardy limit długości promptu (whisper mieści ~224 tokeny)
+repetition_guard = true    # segment będący echem promptu licz ponownie bez kontekstu
+repetition_threshold = 0.8 # podobieństwo, od którego segment jest echem
 
 [parakeet]                    # używane tylko przy backend = "parakeet"
 model = ""                    # ścieżka ggml; puste = $DIKTATE_PARAKEET_MODEL,
@@ -76,12 +82,11 @@ max_pending_segments = 16
 ```
 
 To jest **całość** dzisiejszego `daemon.toml`. Walidacja odrzuca nieznane
-pola, więc sekcje z dalszych etapów — `[whisper.context]`, `[filters]`,
-`[journal]`, `[wakeword]`, `[ipc]`, `[log]` i `[profiles.*]` — nie wpisuje
-się „na zapas": plik z nimi nie przejdzie walidacji. Dochodzą razem z
-etapami, które ich używają. Filtry halucynacji działają dziś na liście
-wkompilowanej w `diktate-core`; przeniesienie ich do `[filters]` to część
-tej samej pracy co journal.
+pola, więc sekcje z dalszych etapów — `[filters]`, `[journal]`, `[wakeword]`,
+`[ipc]`, `[log]` i `[profiles.*]` — nie wpisuje się „na zapas": plik z nimi
+nie przejdzie walidacji. Dochodzą razem z etapami, które ich używają. Filtry
+halucynacji działają dziś na liście wkompilowanej w `diktate-core`;
+przeniesienie ich do `[filters]` to część tej samej pracy co journal.
 
 ### Dlaczego progi VAD nazywają się właśnie tak
 
@@ -164,6 +169,10 @@ toggle_recording = "<Control>space"   # wewnątrz okna, nie globalny
 enabled = true
 show_backlog = true
 
+[whisper]
+prompt = ""          # szablon; {kontekst} to miejsce na ogon dokumentu
+context_chars = 200  # ile znaków przed kursorem wchodzi w {kontekst}
+
 [correction]                   # korekta tekstu LLM-em, patrz docs/11
 enabled = true                 # false ukrywa przycisk w oknie
 endpoint = "http://home-host.tarpan-flops.ts.net:8080/v1/chat/completions"
@@ -183,6 +192,14 @@ user_template = "Popraw:\n\n{text}"   # {text} zastępuje treść notatki
 redaction_system_prompt = '''…'''     # instrukcja redaktora; domyślna w docs/11
 redaction_user_template = "Polecenie: {instruction}\n\nTekst:\n\n{text}"
 ```
+
+Pusty `prompt` w `[whisper]` znaczy „nie wysyłaj kontekstu w ogóle" — daemon
+zostaje wtedy przy `whisper.initial_prompt`, czyli zachowaniu sprzed tej
+funkcji. To wartość domyślna, więc aktualizacja niczego nikomu nie zmienia,
+dopóki sam nie wejdzie w okno ustawień ([06](06-gui.md#okno-ustawień)).
+`context_chars` ≤ `whisper.context.max_prompt_chars` z `daemon.toml` nie jest
+sprawdzane między plikami — klient nie czyta `daemon.toml` — od tego jest
+właśnie ten awaryjny limit po stronie daemona.
 
 **Prompt jest polem konfiguracji, nie stałą w kodzie.** To on decyduje o całym
 zachowaniu korekty: ten sam model z promptem ostrożnym nie naprawia nawet

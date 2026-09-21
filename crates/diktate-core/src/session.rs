@@ -39,6 +39,7 @@ use anyhow::{anyhow, Context, Result};
 use crate::capture::{Recorder, StreamingRecording};
 use crate::filters;
 use crate::level::{Level, LevelMeter, DEFAULT_INTERVAL_MS};
+use crate::prompt::{self, PromptSlot};
 use crate::segmenter::{Segment, Segmenter, SegmenterConfig};
 use crate::transcribe::Transcribe;
 use crate::vad::{Vad, CHUNK_SAMPLES};
@@ -56,6 +57,13 @@ pub struct SessionConfig {
     pub queue_capacity: usize,
     /// Odstęp między odczytami poziomu sygnału.
     pub level_interval_ms: u32,
+    /// Twardy limit długości promptu. Whisper mieści w prompcie ~224 tokeny,
+    /// a klient bywa cudzy — dłuższy prompt obcinamy zamiast ufać.
+    pub max_prompt_chars: usize,
+    /// Czy segment będący echem promptu liczyć ponownie bez kontekstu.
+    pub repetition_guard: bool,
+    /// Podobieństwo, od którego segment uchodzi za echo promptu.
+    pub repetition_threshold: f32,
 }
 
 impl Default for SessionConfig {
@@ -65,6 +73,9 @@ impl Default for SessionConfig {
             vad_threshold: 0.5,
             queue_capacity: 16,
             level_interval_ms: DEFAULT_INTERVAL_MS,
+            max_prompt_chars: 900,
+            repetition_guard: true,
+            repetition_threshold: 0.8,
         }
     }
 }
@@ -99,12 +110,18 @@ impl FrameAssembler {
 
 /// Licznik zaległości kolejki transkrypcji: liczba segmentów czekających w
 /// kolejce plus ten aktualnie transkrybowany. [`Session::start`] dzieli go
-/// (przez `Arc`) między wątek segmentujący, który zwiększa go o 1 po każdym
-/// udanym wysłaniu segmentu do kolejki ([`dispatch_segment`]), a wątek
+/// (przez `Arc`) między wątek segmentujący, który zwiększa go o 1 **przed**
+/// próbą wysłania segmentu do kolejki i natychmiast cofa ten wzrost przez
+/// `dec()`, jeśli wysłanie się nie uda ([`dispatch_segment`]), a wątek
 /// transkrypcji, który zmniejsza go o 1 po zakończeniu obsługi segmentu —
 /// niezależnie od tego, czy wynik trafił do `on_segment`, czy został
-/// odrzucony przez filtr. Segment porzucony z powodu pełnej kolejki nigdy
-/// nie trafił do kolejki, więc licznika nie dotyczy. Przy każdej zmianie
+/// odrzucony przez filtr. Kolejność inc-przed-try_send jest celowa: gdyby
+/// zaległość rosła dopiero po udanym wysłaniu, wątek transkrypcji
+/// teoretycznie mógłby zdążyć odebrać segment i wywołać `dec()`, zanim
+/// `inc()` się wykona, co zeszłoby poniżej zera. Segment porzucony z powodu
+/// pełnej kolejki chwilowo podnosi i od razu cofa licznik, więc efekt netto
+/// jest taki sam, jak dla segmentu, który nigdy nie trafił do kolejki. Przy
+/// każdej zmianie — także przy tym przejściowym podniesieniu i cofnięciu —
 /// woła `on_change` z nową wartością.
 struct Backlog<G> {
     count: AtomicU32,
@@ -170,6 +187,9 @@ pub struct Session {
 
 impl Session {
     /// Uruchamia mikrofon i dwa wątki robocze (segmentujący i transkrypcji).
+    /// `prompt` to slot dzielony z połączeniem IPC (`docs/07#kontekst-dla-whispera`):
+    /// wątek transkrypcji czyta go przed każdym segmentem, więc kontekst
+    /// dosłany w trakcie sesji działa od najbliższej wypowiedzi.
     /// `on_segment` jest wołane z wątku transkrypcji dla każdego niepustego
     /// wyniku — musi być `Send + 'static`, bo żyje poza wątkiem wołającym.
     /// `on_backlog` jest wołane za każdym razem, gdy zmienia się liczba
@@ -182,6 +202,7 @@ impl Session {
     pub fn start<F, G, L>(
         transcriber: Arc<dyn Transcribe>,
         config: SessionConfig,
+        prompt: Arc<PromptSlot>,
         on_segment: F,
         on_backlog: G,
         on_level: L,
@@ -203,6 +224,11 @@ impl Session {
         let (segment_tx, segment_rx) = mpsc::sync_channel::<(u64, Segment, Instant)>(config.queue_capacity);
         let backlog = Arc::new(Backlog::new(on_backlog));
 
+        // `config` wywodzi `Clone`: wątek segmentujący bierze z niego tylko
+        // `segmenter` (już wyodrębniony wyżej) i `level_interval_ms`, a
+        // wątek transkrypcji potrzebuje własnej kopii dla progów promptu.
+        let transcriber_config = config.clone();
+
         let segmenter_backlog = Arc::clone(&backlog);
         let segmenter_handle = std::thread::spawn(move || {
             run_segmenter(
@@ -221,6 +247,8 @@ impl Session {
             run_transcriber(
                 segment_rx,
                 transcriber.as_ref(),
+                prompt.as_ref(),
+                &transcriber_config,
                 on_segment,
                 &transcriber_backlog,
             );
@@ -298,23 +326,34 @@ fn run_segmenter<G: Fn(u32), L: Fn(Level)>(
 
 /// Wysyła gotowy segment do wątku transkrypcji, nie blokując się. Gdy kolejka
 /// jest pełna (transkrypcja nie nadąża) albo odbiorca już zniknął, segment
-/// jest porzucany z komunikatem na stderr — nigdy nie czekamy. Zaległość
-/// ([`Backlog`]) rośnie tylko wtedy, gdy segment faktycznie trafił do
-/// kolejki — porzucony segment nigdy w niej nie był, więc jej nie zwiększa.
+/// jest porzucany z komunikatem na stderr — nigdy nie czekamy.
+///
+/// `inc()` idzie **przed** `try_send`, nie po nim: gdyby zaległość rosła
+/// dopiero po udanym wysłaniu, wątek transkrypcji teoretycznie mógłby zdążyć
+/// odebrać ten sam segment i wywołać `dec()`, zanim `inc()` tutaj w ogóle się
+/// wykona — licznik zszedłby poniżej zera (panika w debugu, absurdalna
+/// zaległość w release). W praktyce wyścig jest nieosiągalny — transkrypcja
+/// trwa setki milisekund — ale kolejność ma być odporna na to z definicji,
+/// a nie z przypadku. Nieudane wysłanie cofa wzrost przez `dec()`, więc
+/// zaległość netto rośnie tylko dla segmentów, które faktycznie trafiły do
+/// kolejki.
 fn dispatch_segment<G: Fn(u32)>(
     segment_tx: &SyncSender<(u64, Segment, Instant)>,
     seq: u64,
     segment: Segment,
     backlog: &Backlog<G>,
 ) {
+    backlog.inc();
     match segment_tx.try_send((seq, segment, Instant::now())) {
-        Ok(()) => backlog.inc(),
+        Ok(()) => {}
         Err(mpsc::TrySendError::Full(_)) => {
+            backlog.dec();
             eprintln!(
                 "sesja: kolejka transkrypcji pełna — segment porzucony (transkrypcja nie nadąża za mową)"
             );
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
+            backlog.dec();
             eprintln!("sesja: wątek transkrypcji już zakończony — segment porzucony");
         }
     }
@@ -323,6 +362,13 @@ fn dispatch_segment<G: Fn(u32)>(
 /// Ciało wątku transkrypcji: bierze gotowe segmenty i woła `Transcriber`.
 /// Kończy się, gdy `segment_rx` się rozłączy i kolejka jest pusta — czyli
 /// dopiero po tym, jak wątek segmentujący skończył i domknął ostatni segment.
+///
+/// Prompt jest czytany z `prompt_slot` **przy każdym segmencie**, nie raz
+/// przed pętlą — kontekst dosłany w trakcie mówienia (`docs/07`) ma
+/// obowiązywać od najbliższej wypowiedzi, a nie dopiero od następnej sesji.
+/// Gdy wynik wygląda na echo promptu ([`prompt::looks_like_echo`]) albo na
+/// zapętlenie ([`prompt::is_looping`]), segment liczony jest ponownie z
+/// pustym promptem — patrz `config.repetition_guard`.
 ///
 /// Wynik przechodzi przez [`filters::clean`] zanim trafi do `on_segment`:
 /// whisper na ciszy albo szumie potrafi zmyślić tekst (znaczniki w rodzaju
@@ -338,6 +384,8 @@ fn dispatch_segment<G: Fn(u32)>(
 fn run_transcriber<F, G: Fn(u32)>(
     segment_rx: Receiver<(u64, Segment, Instant)>,
     transcriber: &dyn Transcribe,
+    prompt_slot: &PromptSlot,
+    config: &SessionConfig,
     on_segment: F,
     backlog: &Backlog<G>,
 ) where
@@ -346,7 +394,41 @@ fn run_transcriber<F, G: Fn(u32)>(
     while let Ok((seq, segment, queued_at)) = segment_rx.recv() {
         let waited = queued_at.elapsed();
         let started = Instant::now();
-        let result = transcriber.transcribe(&segment.audio);
+        // Slot czytany przy każdym segmencie, nie raz na sesję: kontekst
+        // przysłany w trakcie mówienia ma działać od następnej wypowiedzi.
+        let stored = prompt_slot.get();
+        let prompt = prompt::clamp(&stored, config.max_prompt_chars);
+        // `clamp` samo milczy — komunikat o obcięciu należy do wywołującego,
+        // i to tylko wtedy, gdy faktycznie coś obcięło (nie przy każdym
+        // segmencie, bo prompt zwykle mieści się bez problemu).
+        let original_chars = stored.chars().count();
+        let clamped_chars = prompt.chars().count();
+        if clamped_chars < original_chars {
+            eprintln!(
+                "sesja: segment {seq} — prompt obcięty od początku ({original_chars} → {clamped_chars} znaków, limit whisper.context.max_prompt_chars = {})",
+                config.max_prompt_chars
+            );
+        }
+        let result = transcriber
+            .transcribe(&segment.audio, prompt)
+            .and_then(|text| {
+                // Strażnik pętli: prompt potrafi skłonić model do przepisania
+                // podpowiedzi zamiast transkrypcji. Drugi przebieg bez promptu
+                // kosztuje jeden przebieg modelu — tanio wobec notatki pełnej
+                // powtórzonego kontekstu (docs/01, docs/07).
+                let echo = !prompt.is_empty()
+                    && config.repetition_guard
+                    && (prompt::looks_like_echo(&text, prompt, config.repetition_threshold)
+                        || prompt::is_looping(&text));
+                if echo {
+                    eprintln!(
+                        "sesja: segment {seq} wygląda na echo promptu — liczę ponownie bez kontekstu"
+                    );
+                    transcriber.transcribe(&segment.audio, "")
+                } else {
+                    Ok(text)
+                }
+            });
         // Diagnostyka rytmu: gdzie naprawdę schodzi czas między końcem
         // wypowiedzi a tekstem na ekranie. Oczekiwanie w kolejce rosnące
         // z segmentu na segment znaczy, że transkrypcja nie nadąża za mową
@@ -387,6 +469,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Mutex;
 
     #[test]
     fn assembler_sklada_porcje_w_pelne_ramki() {
@@ -496,9 +579,12 @@ mod tests {
         dispatch_segment(&tx, 0, segment(1.0), &backlog); // trafia do kolejki, licznik = 1
         dispatch_segment(&tx, 1, segment(2.0), &backlog); // kolejka pełna, porzucony
 
+        // Licznik netto zostaje na 1 — drugi segment nigdy nie trafił do
+        // kolejki. `inc()` idzie jednak przed `try_send`, więc dla porzuconego
+        // segmentu widać przejściowe podniesienie do 2 i natychmiastowe
+        // cofnięcie przez `dec()`, zanim wynik dotrze na zewnątrz.
         assert_eq!(backlog.count.load(Ordering::SeqCst), 1);
-        // Callback wołany tylko raz — przy udanym wysłaniu.
-        assert_eq!(*history.borrow(), vec![1]);
+        assert_eq!(*history.borrow(), vec![1, 2, 1]);
     }
 
     #[test]
@@ -531,5 +617,128 @@ mod tests {
         backlog2.finish();
         assert_eq!(backlog2.count.load(Ordering::SeqCst), 0);
         assert_eq!(*history2.borrow(), vec![1, 0, 0]);
+    }
+
+    use crate::prompt::PromptSlot;
+    use crate::transcribe::Transcribe;
+    use std::sync::mpsc::sync_channel;
+
+    /// Atrapa silnika: oddaje z góry zadane teksty i zapisuje prompty.
+    struct Atrapa {
+        odpowiedzi: Mutex<std::collections::VecDeque<String>>,
+        prompty: Mutex<Vec<String>>,
+    }
+
+    impl Atrapa {
+        fn nowa(odpowiedzi: &[&str]) -> Self {
+            Self {
+                odpowiedzi: Mutex::new(odpowiedzi.iter().map(|s| s.to_string()).collect()),
+                prompty: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Transcribe for Atrapa {
+        fn transcribe(&self, _samples: &[f32], prompt: &str) -> anyhow::Result<String> {
+            self.prompty.lock().unwrap().push(prompt.to_string());
+            Ok(self
+                .odpowiedzi
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| "nic".to_string()))
+        }
+    }
+
+    fn przepusc(
+        atrapa: &Atrapa,
+        slot: &PromptSlot,
+        config: SessionConfig,
+        ile: usize,
+    ) -> Vec<String> {
+        let (tx, rx) = sync_channel(ile);
+        let backlog = Backlog::new(|_| {});
+        for seq in 0..ile {
+            // Naśladujemy `dispatch_segment`: w prawdziwym potoku `inc()`
+            // poprzedza próbę wysłania do kanału (nieudane wysłanie cofa go
+            // przez `dec()`), więc `dec()` w `run_transcriber` zawsze ma się
+            // do czego odnieść — bez tego licznik schodziłby poniżej zera
+            // i celowo panikowałby.
+            backlog.inc();
+            tx.send((seq as u64, segment(0.1), Instant::now())).unwrap();
+        }
+        drop(tx);
+        let wyniki = Arc::new(Mutex::new(Vec::new()));
+        let zebrane = Arc::clone(&wyniki);
+        run_transcriber(
+            rx,
+            atrapa,
+            slot,
+            &config,
+            move |segment: TranscribedSegment| zebrane.lock().unwrap().push(segment.text),
+            &backlog,
+        );
+        let out = wyniki.lock().unwrap().clone();
+        out
+    }
+
+    #[test]
+    fn transkrypcja_bierze_prompt_ze_slotu() {
+        let atrapa = Atrapa::nowa(&["pierwszy", "drugi"]);
+        let slot = PromptSlot::new();
+        slot.set("Terminy: ggml.");
+        przepusc(&atrapa, &slot, SessionConfig::default(), 2);
+        assert_eq!(
+            atrapa.prompty.lock().unwrap().as_slice(),
+            ["Terminy: ggml.", "Terminy: ggml."]
+        );
+    }
+
+    #[test]
+    fn prompt_dluzszy_niz_limit_jest_obcinany_od_poczatku() {
+        let atrapa = Atrapa::nowa(&["tekst"]);
+        let slot = PromptSlot::new();
+        slot.set("abcdefghij");
+        let config = SessionConfig {
+            max_prompt_chars: 4,
+            ..SessionConfig::default()
+        };
+        przepusc(&atrapa, &slot, config, 1);
+        assert_eq!(atrapa.prompty.lock().unwrap().as_slice(), ["ghij"]);
+    }
+
+    #[test]
+    fn echo_promptu_jest_liczone_ponownie_bez_kontekstu() {
+        let echo = "Transkrypcja notatek technicznych. Terminy: Kubernetes, Wayland, systemd.";
+        let atrapa = Atrapa::nowa(&[echo, "prawdziwa wypowiedź po drugim przebiegu"]);
+        let slot = PromptSlot::new();
+        slot.set(echo);
+        let wyniki = przepusc(&atrapa, &slot, SessionConfig::default(), 1);
+        assert_eq!(wyniki, ["prawdziwa wypowiedź po drugim przebiegu"]);
+        // Drugi przebieg poszedł z pustym promptem — inaczej echo wróciłoby.
+        assert_eq!(atrapa.prompty.lock().unwrap()[1], "");
+    }
+
+    #[test]
+    fn zwykla_wypowiedz_idzie_jednym_przebiegiem() {
+        let atrapa = Atrapa::nowa(&["Wiązania okazały się szybsze, niż zakładałem."]);
+        let slot = PromptSlot::new();
+        slot.set("Wczoraj zbudowałem wiązania rustowe do whisper.cpp i zmierzyłem czasy.");
+        przepusc(&atrapa, &slot, SessionConfig::default(), 1);
+        assert_eq!(atrapa.prompty.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn wylaczony_straznik_nie_powtarza_przebiegu() {
+        let echo = "Transkrypcja notatek technicznych. Terminy: Kubernetes, Wayland, systemd.";
+        let atrapa = Atrapa::nowa(&[echo, "drugi przebieg"]);
+        let slot = PromptSlot::new();
+        slot.set(echo);
+        let config = SessionConfig {
+            repetition_guard: false,
+            ..SessionConfig::default()
+        };
+        przepusc(&atrapa, &slot, config, 1);
+        assert_eq!(atrapa.prompty.lock().unwrap().len(), 1);
     }
 }

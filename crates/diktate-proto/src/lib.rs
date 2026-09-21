@@ -28,12 +28,14 @@ pub fn socket_path() -> PathBuf {
 pub const METHOD_SESSION_START: &str = "session.start";
 pub const METHOD_SESSION_STOP: &str = "session.stop";
 pub const METHOD_SESSION_SUBSCRIBE: &str = "session.subscribe";
+pub const METHOD_SESSION_CONTEXT: &str = "session.context";
 pub const NOTIFY_SEGMENT_ADDED: &str = "segment.added";
 pub const NOTIFY_STATE_CHANGED: &str = "state.changed";
 pub const NOTIFY_AUDIO_LEVEL: &str = "audio.level";
 
 /// Czego klient chce słuchać poza tym, co dostaje każdy.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Subscription {
     /// Poziom sygnału z mikrofonu (`audio.level`). Domyślnie wyłączony —
     /// to kilkanaście wiadomości na sekundę i ma je dostawać tylko ten,
@@ -42,15 +44,34 @@ pub struct Subscription {
     pub levels: bool,
 }
 
+/// Kontekst transkrypcji: gotowy prompt złożony przez klienta
+/// (`docs/02#kontekst-transkrypcji`). Pusty `text` czyści slot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextParams {
+    pub text: String,
+}
+
+/// Parametry żądania. `untagged`, bo JSON-RPC nie niesie znacznika wariantu —
+/// rozróżnia je kształt obiektu, dlatego **oba** warianty mają
+/// `deny_unknown_fields`: bez tego `Subscription` (same pola z wartością
+/// domyślną) dopasowałaby się do dowolnego obiektu i zjadła kontekst.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestParams {
+    Subscribe(Subscription),
+    Context(ContextParams),
+}
+
 /// Wiadomość idąca do daemona.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub jsonrpc: String,
     pub id: u64,
     pub method: String,
-    /// Parametry wywołania. Dziś używa ich wyłącznie `session.subscribe`.
+    /// Parametry wywołania. Używane przez `session.subscribe` i `session.context`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<Subscription>,
+    pub params: Option<RequestParams>,
 }
 
 impl Request {
@@ -65,8 +86,15 @@ impl Request {
 
     pub fn subscribe(id: u64, subscription: Subscription) -> Self {
         Self {
-            params: Some(subscription),
+            params: Some(RequestParams::Subscribe(subscription)),
             ..Self::new(id, METHOD_SESSION_SUBSCRIBE)
+        }
+    }
+
+    pub fn context(id: u64, text: impl Into<String>) -> Self {
+        Self {
+            params: Some(RequestParams::Context(ContextParams { text: text.into() })),
+            ..Self::new(id, METHOD_SESSION_CONTEXT)
         }
     }
 }
@@ -95,6 +123,17 @@ impl Response {
             jsonrpc: "2.0".to_string(),
             id,
             result: Some(serde_json::json!({})),
+            error: None,
+        }
+    }
+
+    /// Odpowiedź z wynikiem innym niż pusty obiekt — `session.context`
+    /// odsyła liczbę znaków, które daemon przyjął.
+    pub fn ok_with(id: u64, result: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result: Some(result),
             error: None,
         }
     }
@@ -319,6 +358,48 @@ mod segment_added_tests {
             serde_json::to_string(&Request::subscribe(3, Subscription { levels: true })).unwrap();
         let back: Request = serde_json::from_str(&line).unwrap();
         assert_eq!(back.method, METHOD_SESSION_SUBSCRIBE);
-        assert!(back.params.unwrap().levels);
+        match back.params {
+            Some(RequestParams::Subscribe(sub)) => assert!(sub.levels),
+            other => panic!("subskrypcja rozpoznana jako {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parametry_z_polem_text_to_kontekst() {
+        let request: Request =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"method":"session.context","params":{"text":"abc"}}"#)
+                .unwrap();
+        match request.params {
+            Some(RequestParams::Context(params)) => assert_eq!(params.text, "abc"),
+            other => panic!("kontekst rozpoznany jako {other:?}"),
+        }
+    }
+
+    // Bez `deny_unknown_fields` `Subscription` (same pola z `default`)
+    // złapałaby każdy obiekt, także ten z kontekstem — i kontekst zniknąłby
+    // po cichu jako subskrypcja bez poziomów.
+    #[test]
+    fn parametry_z_polem_levels_to_nadal_subskrypcja() {
+        let request: Request =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"method":"session.subscribe","params":{"levels":true}}"#)
+                .unwrap();
+        match request.params {
+            Some(RequestParams::Subscribe(params)) => assert!(params.levels),
+            other => panic!("subskrypcja rozpoznana jako {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zadanie_kontekstu_serializuje_sie_z_tekstem() {
+        let line = serde_json::to_string(&Request::context(7, "Terminy: ggml.")).unwrap();
+        assert!(line.contains(r#""method":"session.context""#), "{line}");
+        assert!(line.contains(r#""text":"Terminy: ggml.""#), "{line}");
+    }
+
+    #[test]
+    fn odpowiedz_z_wynikiem_niesie_liczbe_znakow() {
+        let response = Response::ok_with(7, serde_json::json!({ "chars": 14 }));
+        let line = serde_json::to_string(&response).unwrap();
+        assert!(line.contains(r#""chars":14"#), "{line}");
     }
 }

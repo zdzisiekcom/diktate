@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<()> {
     let mut times = Vec::with_capacity(runs);
     for i in 1..=runs {
         let started = Instant::now();
-        let text = transcriber.transcribe(&samples)?;
+        let text = transcriber.transcribe(&samples, "")?;
         let ms = started.elapsed().as_millis();
         times.push(ms);
         println!("przebieg {i}: {ms} ms{}", if i == 1 { "  (pierwszy)" } else { "" });

@@ -13,13 +13,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use diktate_config::{Backend, DaemonConfig};
 use diktate_core::segmenter::SegmenterConfig;
 use diktate_core::{
-    parakeet::default_parakeet_model_path, transcribe::default_model_path, ParakeetTranscriber,
-    Session, SessionConfig, Transcribe,
-    Transcriber,
+    parakeet::default_parakeet_model_path, prompt::PromptSlot, transcribe::default_model_path,
+    ParakeetTranscriber, Session, SessionConfig, Transcribe, Transcriber,
 };
 use diktate_proto::{
-    pidfile, socket_path, Notification, Request, Response, SegmentAdded, SessionState, METHOD_SESSION_START,
-    METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
+    pidfile, socket_path, Notification, Request, RequestParams, Response, SegmentAdded, SessionState, Subscription,
+    METHOD_SESSION_CONTEXT, METHOD_SESSION_START, METHOD_SESSION_STOP, METHOD_SESSION_SUBSCRIBE,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -204,6 +203,9 @@ fn session_config(config: &DaemonConfig) -> SessionConfig {
         vad_threshold: config.vad.threshold,
         queue_capacity: config.queue.max_pending_segments,
         level_interval_ms: config.audio.level_interval_ms,
+        max_prompt_chars: config.whisper.context.max_prompt_chars,
+        repetition_guard: config.whisper.context.repetition_guard,
+        repetition_threshold: config.whisper.context.repetition_threshold,
     }
 }
 
@@ -219,6 +221,10 @@ fn serve(stream: UnixStream, transcriber: &Arc<dyn Transcribe>) -> Result<()> {
     // `audio.level` to kilkanaście wiadomości na sekundę — dostaje je
     // wyłącznie klient, który poprosił o nie jawnie (docs/02).
     let levels_wanted = Arc::new(AtomicBool::new(false));
+    // Prompt należy do połączenia, nie do sesji: kontekst przysłany przed
+    // pierwszym `session.start` ma obowiązywać od pierwszej wypowiedzi,
+    // a `session.stop` nie jest powodem, żeby go zapominać (docs/02).
+    let prompt = Arc::new(PromptSlot::new());
 
     for line in reader.lines() {
         let line = line.context("nie udało się odczytać linii z gniazda")?;
@@ -261,6 +267,7 @@ fn serve(stream: UnixStream, transcriber: &Arc<dyn Transcribe>) -> Result<()> {
                 match Session::start(
                     Arc::clone(transcriber),
                     session_config(&config),
+                    Arc::clone(&prompt),
                     move |segment| {
                         eprintln!(
                             "diktate-daemon: [{}] {} ({}–{} ms)",
@@ -326,9 +333,29 @@ fn serve(stream: UnixStream, transcriber: &Arc<dyn Transcribe>) -> Result<()> {
                 }
             }
             METHOD_SESSION_SUBSCRIBE => {
-                let wanted = request.params.unwrap_or_default().levels;
+                let wanted = matches!(
+                    request.params,
+                    Some(RequestParams::Subscribe(Subscription { levels: true }))
+                );
                 levels_wanted.store(wanted, Ordering::Relaxed);
                 send(&writer, &Response::ok(request.id))?;
+            }
+            METHOD_SESSION_CONTEXT => {
+                // Podpowiedź, nie zobowiązanie: żądanie bez parametrów albo
+                // z parametrami innego kształtu czyści slot i kończy się
+                // powodzeniem. Transkrypcja ma działać także wtedy, gdy nikt
+                // kontekstu nie przysłał (docs/02).
+                let text = match request.params {
+                    Some(RequestParams::Context(params)) => params.text,
+                    _ => String::new(),
+                };
+                prompt.set(&text);
+                let chars = text.chars().count();
+                eprintln!("diktate-daemon: kontekst — {chars} znaków");
+                send(
+                    &writer,
+                    &Response::ok_with(request.id, serde_json::json!({ "chars": chars })),
+                )?;
             }
             METHOD_SESSION_STOP => {
                 let Some(active) = session.take() else {

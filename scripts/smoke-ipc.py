@@ -30,13 +30,15 @@ def connect_to_daemon(socket_path):
         print(f"Error: Connection refused to {socket_path}")
         sys.exit(1)
 
-def send_message(sock, method, msg_id):
+def send_message(sock, method, msg_id, params=None):
     """Send a JSON-RPC message."""
     message = {
         "jsonrpc": "2.0",
         "id": msg_id,
         "method": method
     }
+    if params is not None:
+        message["params"] = params
     message_str = json.dumps(message)
     print(f"→ Sent: {message_str}")
     sock.sendall((message_str + '\n').encode('utf-8'))
@@ -60,6 +62,32 @@ def read_message(sock, timeout=None):
         print(f"Error decoding JSON: {e}")
         return None
 
+def read_response(sock, timeout=None):
+    """Czyta odpowiedź z gniazda, pomijając powiadomienia po drodze.
+
+    Daemon miesza na jednym gnieździe odpowiedzi (mają pole 'id') z
+    powiadomieniami — state.changed, segment.added, audio.level — które
+    mają 'method', a nie 'id', i mogą przyjść w dowolnej chwili między
+    wysłaniem żądania a jego odpowiedzią (docs/02). Ta funkcja czyta kolejne
+    linie, wypisuje i odrzuca każdą bez 'id', i zwraca dopiero tę pierwszą,
+    która wygląda na odpowiedź.
+    """
+    deadline = None if timeout is None else time.time() + timeout
+    while True:
+        if deadline is not None:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+        else:
+            remaining = None
+        message = read_message(sock, timeout=remaining)
+        if message is None:
+            return None
+        if "id" not in message:
+            print(f"  (pominięto powiadomienie: {json.dumps(message)})")
+            continue
+        return message
+
 def main():
     socket_path = get_socket_path()
     print(f"Connecting to {socket_path}...")
@@ -69,10 +97,41 @@ def main():
 
     success = True
 
+    # Wyślij session.context z tekstem — daemon ma zwrócić liczbę znaków.
+    print("=== Faza 0a: session.context (z tekstem) ===")
+    kontekst = "Terminy: ggml, Wayland.\nOstatnie zdanie notatki."
+    send_message(sock, "session.context", 1, {"text": kontekst})
+    response_context = read_response(sock, timeout=5)
+
+    if response_context is None:
+        print("← Błąd: brak odpowiedzi na session.context")
+        success = False
+    else:
+        print(f"← Otrzymano: {json.dumps(response_context)}")
+        chars = response_context.get("result", {}).get("chars")
+        if chars != 48:
+            print(f"Błąd: oczekiwano chars == 48, otrzymano {chars!r}")
+            success = False
+
+    # Wyślij session.context z pustym tekstem — slot ma się wyczyścić.
+    print("\n=== Faza 0b: session.context (pusty tekst) ===")
+    send_message(sock, "session.context", 2, {"text": ""})
+    response_context_empty = read_response(sock, timeout=5)
+
+    if response_context_empty is None:
+        print("← Błąd: brak odpowiedzi na session.context (pusty tekst)")
+        success = False
+    else:
+        print(f"← Otrzymano: {json.dumps(response_context_empty)}")
+        chars = response_context_empty.get("result", {}).get("chars")
+        if chars != 0:
+            print(f"Błąd: oczekiwano chars == 0, otrzymano {chars!r}")
+            success = False
+
     # Send session.start
-    print("=== Phase 1: session.start ===")
-    send_message(sock, "session.start", 1)
-    response1 = read_message(sock, timeout=5)
+    print("\n=== Phase 1: session.start ===")
+    send_message(sock, "session.start", 3)
+    response1 = read_response(sock, timeout=5)
 
     if response1 is None:
         print("← Error: No response received for session.start")
@@ -92,8 +151,8 @@ def main():
 
     # Send session.stop
     print("\n=== Phase 2: session.stop ===")
-    send_message(sock, "session.stop", 2)
-    response2 = read_message(sock, timeout=5)
+    send_message(sock, "session.stop", 4)
+    response2 = read_response(sock, timeout=5)
 
     if response2 is None:
         print("← Error: No response received for session.stop")
@@ -135,7 +194,7 @@ def main():
 
     print("\n=== Summary ===")
     if success:
-        print("✓ Both session.start and session.stop responses received with 'result'")
+        print("✓ session.context, session.start i session.stop odpowiedziały poprawnie")
         sys.exit(0)
     else:
         print("✗ Error: One or more responses contained 'error' or was not received")
