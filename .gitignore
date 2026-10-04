@@ -2,39 +2,72 @@
 /target/
 **/*.rs.bk
 *.pdb
+*.profraw
 
 # Cargo — lockfile trzymamy w repo (projekt zawiera binarki, nie tylko biblioteki)
 
-# Artefakty budowania whisper.cpp przez whisper-rs
-/whisper.cpp/
+# Artefakty C/C++ — whisper.cpp buduje się przez cmake wewnątrz target/,
+# a te wzorce łapią ręczne buildy w drzewie. Wnętrza submodułu
+# vendor/whisper.cpp ten plik nie dotyczy: pilnuje go jego własny .gitignore.
+/build/
+CMakeFiles/
+CMakeCache.txt
 *.o
 *.a
 *.so
 *.dylib
 
-# Modele — pobierane przez `diktate-cli model pull`, po kilka GB
+# Modele — pobierane przez `diktate-cli model pull` do ~/.diktate/models,
+# po kilkaset MB; nie mają czego szukać w repozytorium
 /models/
 *.bin
 *.gguf
+*.ggml
 *.onnx
 *.tflite
+*.nemo
+*.safetensors
+*.pt
 
-# Dane środowiska uruchomieniowego
+# Dane środowiska uruchomieniowego i nagrania
 /journal/
 *.ndjson
 *.wav
+*.flac
+*.mp3
+*.ogg
+*.opus
 !testdata/**/*.wav
 
-# Lokalna konfiguracja użytkownika (przykłady trzymamy jako *.toml.example)
+# Lokalna konfiguracja użytkownika (żyje w ~/.config/diktate, nie tu)
 /daemon.toml
 /agent.toml
 /gtk.toml
+*.bak
+
+# Sekrety — klucz API korekty, tokeny, certyfikaty
+.env
+.env.*
+*.pem
+*.key
+
+# Lokalny stan narzędzi AI (pamięć sesji, plany robocze, ustawienia prywatne)
+/.remember/
+/.superpowers/
+/.claude/settings.local.json
+CLAUDE.local.md
+
+# Python (scripts/)
+__pycache__/
+*.pyc
 
 # Edytory i system
 .vscode/
 .idea/
 *.swp
+*.swo
 *~
+.#*
 .DS_Store
 
 # Narzędzia
